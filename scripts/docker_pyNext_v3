@@ -21,7 +21,7 @@ spinner() {
     printf "\r${CYAN}%s${NC} %s" "${spin:$i:1}" "$message"
     sleep .1
   done
-  wait "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null
   printf "\r${GREEN}✔${NC} %s\n" "$message"
 }
 
