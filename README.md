@@ -219,6 +219,16 @@ docker run --rm -it \
   "$DOCKERHUB_USER/docker-pynext:latest" my-new-project
 ```
 
+One-command behavior:
+
+- runs from your current directory and creates `./my-new-project`
+- starts `db`, `backend`, and `frontend` containers automatically
+- verifies container status and backend-to-db connectivity
+- prints quick localhost links when ready:
+  - `http://localhost:3000`
+  - `http://localhost:8000/users`
+  - `http://localhost:8000/docs`
+
 ## Productivity Gains
 
 - One command to provision a working full-stack dev environment.

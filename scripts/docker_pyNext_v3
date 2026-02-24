@@ -476,10 +476,49 @@ done
 echo -e "\r${GREEN}✔ Database ready!${NC}"
 
 ###########################################
+# 🔎 Verify Services
+###########################################
+echo -e "${CYAN}🔎 Verifying container status...${NC}"
+running_services="$(docker-compose ps --services --filter "status=running" 2>/dev/null || true)"
+all_running=true
+
+for svc in db backend frontend; do
+  if printf "%s\n" "$running_services" | grep -qx "$svc"; then
+    echo -e "${GREEN}✔ ${svc} is running${NC}"
+  else
+    echo -e "${RED}✖ ${svc} is not running${NC}"
+    all_running=false
+  fi
+done
+
+echo -e "${CYAN}🔗 Verifying backend ↔ database connectivity...${NC}"
+connected=false
+for i in {1..30}; do
+  if docker-compose exec -T backend python -c "import socket; socket.create_connection(('db', 5432), 2).close()" >/dev/null 2>&1; then
+    connected=true
+    break
+  fi
+  printf "\r${YELLOW}⌛ Waiting for backend networking... (%s/30)${NC}" "$i"
+  sleep 1
+done
+printf "\n"
+
+if [ "$connected" = true ]; then
+  echo -e "${GREEN}✔ Backend can reach db:5432${NC}"
+else
+  echo -e "${YELLOW}⚠️ Could not verify backend-to-db connectivity yet.${NC}"
+fi
+
+###########################################
 # 🎉 Done
 ###########################################
 echo -e "${GREEN}"
 echo "🎉 Project '$PROJECT_NAME' is ready!"
+if [ "$all_running" = true ] && [ "$connected" = true ]; then
+  echo "🔌 Containers are running and connected."
+else
+  echo "⚠️  Some services may still be starting. Check: docker-compose logs -f"
+fi
 echo "🌐 Frontend → http://localhost:3000"
 echo "🧠 Backend  → http://localhost:8000/users"
 echo "📚 Docs     → http://localhost:8000/docs"
