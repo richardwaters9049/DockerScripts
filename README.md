@@ -5,107 +5,90 @@
 [![Next.js](https://img.shields.io/badge/Frontend-Next.js-000000?logo=nextdotjs&logoColor=white)](https://nextjs.org/docs)
 [![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![Prisma](https://img.shields.io/badge/ORM-Prisma-2D3748?logo=prisma&logoColor=white)](https://www.prisma.io/docs)
+[![Postgres](https://img.shields.io/badge/Database-PostgreSQL-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org/docs/)
 
-Opinionated Bash automation scripts for creating full-stack, containerized developer environments in minutes.
+Opinionated Bash automation scripts that spin up full-stack, containerized developer environments in minutes. ✨
 
 ## Table of Contents
 
 - [Overview](#overview)
-- [Repository Layout](#repository-layout)
-- [What the Scripts Do](#what-the-scripts-do)
-- [Script Comparison](#script-comparison)
+- [What These Scripts Do](#what-these-scripts-do)
+- [Script Options](#script-options)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
-- [Generated Environment](#generated-environment)
-- [How This Improves Productivity](#how-this-improves-productivity)
+- [Generated Developer Environment](#generated-developer-environment)
+- [Testing](#testing)
+- [Productivity Gains](#productivity-gains)
 - [Usage Guidelines](#usage-guidelines)
 - [Troubleshooting](#troubleshooting)
 - [Tech Stack Links](#tech-stack-links)
 
 ## Overview
 
-This repository provides project bootstrap scripts that:
+These scripts automate the heavy lifting of setting up a modern full-stack app so developers can move directly to building features. 🚀
 
-- scaffold a FastAPI + Next.js full-stack app
-- provision PostgreSQL with Docker Compose
-- configure Prisma for Python
-- seed initial data
-- launch local containers ready for development
+Each run creates and starts:
 
-The goal is to remove repetitive setup work and give teams a consistent local environment from day one.
+- a [FastAPI](https://fastapi.tiangolo.com/) backend
+- a [Next.js](https://nextjs.org/docs) frontend
+- a [PostgreSQL](https://www.postgresql.org/docs/) database
+- Prisma schema/client wiring for backend data access
+- seed and test scaffolding for immediate validation
 
-## Repository Layout
+## What These Scripts Do
 
-```text
-DockerScripts/
-├── README.md
-└── scripts/
-    ├── docker_pyNext
-    ├── docker_pyNext_v2
-    ├── docker_pyNext_v3
-    └── NextPY-Docscript.md
-```
+Given a project name, each script:
 
-## What the Scripts Do
+1. Scaffolds backend and frontend app structure.
+2. Generates core source files, config, and Docker assets.
+3. Creates `docker-compose.yml` with `frontend`, `backend`, and `db` services.
+4. Starts containers and waits for database readiness.
+5. Outputs local URLs so development can begin immediately.
 
-Each script takes a project name and creates a new directory with:
+## Script Options
 
-- `backend/` (FastAPI service)
-- `frontend/` (Next.js app)
-- `backend/prisma/schema.prisma` (data model)
-- `docker-compose.yml` (db + backend + frontend services)
-- seed/test boilerplate for quick verification
-
-During execution, scripts also:
-
-- prompt before overwriting existing folders
-- build and start containers
-- wait for database readiness before finishing
-
-## Script Comparison
-
-| Script | Best For | Notable Behavior |
+| Script | Best For | Highlights |
 | --- | --- | --- |
-| `scripts/docker_pyNext` | Base scaffold | Creates users + training endpoints and basic frontend scaffold |
-| `scripts/docker_pyNext_v2` | Enhanced UI scaffold | Adds modern users dashboard with Framer Motion |
-| `scripts/docker_pyNext_v3` | Most stable/default choice | Improves generated test compatibility, API base configuration, and startup robustness |
+| `scripts/docker_pyNext` | Base starter | Fast bootstrap with users + training API pattern |
+| `scripts/docker_pyNext_v2` | UI-rich starter | Includes animated users dashboard setup |
+| `scripts/docker_pyNext_v3` | Recommended default | Most stable flow, improved test setup, cleaner API base config |
 
-Recommendation: start with `scripts/docker_pyNext_v3` unless you specifically need an older variant.
+Recommendation: use `scripts/docker_pyNext_v3` for new projects unless you need older behavior.
 
 ## Prerequisites
 
-Install these on your machine before running scripts:
+Install before running:
 
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or Docker Engine)
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) or Docker Engine
 - [Docker Compose](https://docs.docker.com/compose/)
 - [Bun](https://bun.sh/docs/installation)
-- `bash` shell
-- Internet access (for pulling images/packages)
+- `bash`
+- internet access for package/image downloads
 
 ## Quick Start
 
-Run from repository root:
+From repository root:
 
 ```bash
 bash scripts/docker_pyNext_v3 my-app
 ```
 
-Alternative variants:
+Other variants:
 
 ```bash
 bash scripts/docker_pyNext my-app
 bash scripts/docker_pyNext_v2 my-app
 ```
 
-After completion:
+After setup:
 
 - Frontend: [http://localhost:3000](http://localhost:3000)
 - Backend: [http://localhost:8000/users](http://localhost:8000/users)
 - API docs (v3): [http://localhost:8000/docs](http://localhost:8000/docs)
 
-## Generated Environment
+## Generated Developer Environment
 
-Typical output structure:
+Typical generated project tree (including frontend details): 🏗️
 
 ```text
 my-app/
@@ -115,50 +98,94 @@ my-app/
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   ├── seed.py
+│   ├── pytest.ini                 # v3
 │   ├── prisma/
 │   │   └── schema.prisma
 │   └── app/
+│       ├── __init__.py            # v3
 │       ├── main.py
 │       ├── database.py
 │       ├── hooks/
+│       │   └── user_hooks.py
 │       └── tests/
+│           └── test_users.py
 └── frontend/
     ├── package.json
+    ├── bun.lockb
     ├── next.config.js
-    └── app/
+    ├── tsconfig.json
+    ├── app/
+    │   ├── page.tsx
+    │   └── globals.css
+    └── public/
 ```
 
-Runtime services:
+Runtime service flow:
 
 ```mermaid
 flowchart LR
-  FE["frontend (Next.js)"] --> BE["backend (FastAPI)"]
-  BE --> DB["db (PostgreSQL)"]
+  FE["frontend (Next.js) 🎨"] --> BE["backend (FastAPI) ⚡"]
+  BE --> DB["db (PostgreSQL) 🐘"]
 ```
 
-## How This Improves Productivity
+## Testing
 
-- Faster onboarding: new developers can run one command and start coding.
-- Consistent environments: everyone runs the same service topology and base config.
-- Less manual setup: Docker, backend, frontend, schema, and seed steps are automated.
-- Faster feedback loop: generated tests and seeded data provide immediate validation.
-- Lower setup drift: scripted project generation reduces per-developer variation.
+The scripts generate backend API test scaffolding so every new environment starts with a validation path. 🧪
+
+How testing is set up:
+
+- generated test file: `backend/app/tests/test_users.py`
+- test framework: `pytest`
+- async test client: `httpx.AsyncClient` with `ASGITransport`
+- async execution support: `pytest-asyncio` (included in v3 requirements)
+- import path support: `backend/pytest.ini` in v3 (`pythonpath = .`)
+
+What the default test validates:
+
+- `/users` endpoint responds with HTTP `200`
+- response payload is a list
+
+Run tests inside Docker (recommended):
+
+```bash
+cd my-app
+docker-compose exec backend pytest -q
+```
+
+Run tests on host machine:
+
+```bash
+cd my-app/backend
+pip install -r requirements.txt
+pytest -q
+```
+
+Tip: Add new tests under `backend/app/tests/` as endpoints or business logic grow.
+
+## Productivity Gains
+
+- One command to provision a working full-stack dev environment.
+- Shared and repeatable setup across the whole team.
+- Less configuration drift between local machines.
+- Faster onboarding for new developers.
+- Built-in starter tests and seeded data shorten feedback loops.
 
 ## Usage Guidelines
 
-- Run scripts from the repository root.
-- Use unique project names to avoid accidental directory conflicts.
-- Read prompts carefully when `Overwrite`, `Keep`, or `Delete` options appear.
-- Prefer v3 for new work unless legacy behavior is required.
-- Commit generated projects separately from this scripts repository.
+- Run scripts from repository root.
+- Use unique project names to avoid collisions.
+- Review `Overwrite`, `Keep`, and `Delete` prompts carefully.
+- Prefer `docker_pyNext_v3` for fresh work.
+- Commit generated app projects separately from this scripts repo.
 
 ## Troubleshooting
 
-- `bun: command not found`: install Bun and re-run.
-- Docker daemon unavailable: start Docker Desktop/Engine and retry.
-- Port conflicts (`3000`, `5432`, `8000`): stop conflicting services or adjust compose ports.
-- Frontend build issues: inside generated project, run `docker-compose logs -f frontend`.
-- Backend startup issues: run `docker-compose logs -f backend` and check DB readiness.
+- `bun: command not found`: install Bun and rerun.
+- Docker daemon unavailable: start Docker and retry.
+- Port already in use (`3000`, `5432`, `8000`): re-map ports or stop conflicting services.
+- Frontend issues: `docker-compose logs -f frontend`
+- Backend issues: `docker-compose logs -f backend`
+- DB readiness issues: verify `db` health check in compose logs.
 
 ## Tech Stack Links
 
