@@ -18,6 +18,7 @@ Opinionated Bash automation scripts that spin up full-stack, containerized devel
 - [Quick Start](#quick-start)
 - [Generated Developer Environment](#generated-developer-environment)
 - [Testing](#testing)
+- [Docker Hub Publishing](#docker-hub-publishing)
 - [Productivity Gains](#productivity-gains)
 - [Usage Guidelines](#usage-guidelines)
 - [Troubleshooting](#troubleshooting)
@@ -161,6 +162,62 @@ pytest -q
 ```
 
 Tip: Add new tests under `backend/app/tests/` as endpoints or business logic grow.
+
+## Docker Hub Publishing
+
+You can package `docker_pyNext_v3` as a reusable Docker image and run it anywhere. 📦
+
+Where to run commands:
+
+- Run the build/push commands from this repo root: `/Users/richy/Documents/Github/DockerScripts`
+- Run `export DOCKERHUB_USER=...` in your terminal session before running build/push commands
+- `export` works in any directory, but using it in the same terminal session as the Docker commands is what matters
+
+How to find your Docker Hub username:
+
+1. Open [Docker Hub](https://hub.docker.com/).
+2. Sign in.
+3. Click your profile avatar (top-right).
+4. Your account username is shown on the profile page and in your namespace (for example `https://hub.docker.com/u/<username>`).
+
+Set your username in terminal:
+
+```bash
+export DOCKERHUB_USER="<your_dockerhub_username>"
+```
+
+Build the image:
+
+```bash
+docker build -f Dockerfile.dockerhub -t "$DOCKERHUB_USER/docker-pynext:v3" .
+```
+
+Test locally:
+
+```bash
+docker run --rm -it \
+  -v "$PWD:/workspace" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  "$DOCKERHUB_USER/docker-pynext:v3" my-app
+```
+
+Create a `docker-pynext` repository on [Docker Hub](https://hub.docker.com/) (one-time), then push:
+
+```bash
+docker login
+docker push "$DOCKERHUB_USER/docker-pynext:v3"
+docker tag "$DOCKERHUB_USER/docker-pynext:v3" "$DOCKERHUB_USER/docker-pynext:latest"
+docker push "$DOCKERHUB_USER/docker-pynext:latest"
+```
+
+Run from Docker Hub anywhere:
+
+```bash
+docker run --rm -it \
+  -v "$PWD:/workspace" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  "$DOCKERHUB_USER/docker-pynext:latest" my-new-project
+```
 
 ## Productivity Gains
 

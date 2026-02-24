@@ -324,7 +324,7 @@ if [ "$SKIP_FRONTEND_CREATE" != "true" ]; then
 
   cd frontend
   bun install & spinner "Installing frontend dependencies"
-  bun pm trust --all
+  bun pm trust --all >/dev/null 2>&1 || true
 
   bun add framer-motion clsx & spinner "Adding Framer Motion and CLSX"
 
