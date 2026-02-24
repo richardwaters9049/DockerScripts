@@ -1,0 +1,487 @@
+#!/usr/bin/env bash
+set -e
+
+###########################################
+# 🎨 Colors & Spinner Utilities!!!
+###########################################
+RED="\033[0;31m"
+GREEN="\033[0;32m"
+CYAN="\033[0;36m"
+PURPLE="\033[0;35m"
+YELLOW="\033[1;33m"
+NC="\033[0m"
+
+spinner() {
+  local message=$1
+  local pid=${2:-$!}  # Use provided PID or fallback to $!
+  local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+  local i=0
+  while kill -0 "$pid" 2>/dev/null; do
+    i=$(( (i+1) % 10 ))
+    printf "\r${CYAN}%s${NC} %s" "${spin:$i:1}" "$message"
+    sleep .1
+  done
+  wait "$pid" 2>/dev/null || true
+  printf "\r${GREEN}✔${NC} %s\n" "$message"
+}
+
+banner() {
+  echo -e "${PURPLE}"
+  echo "╔════════════════════════════════════════════════╗"
+  echo "║ 🚀 docker-nextpy — FULLSTACK LAB v14.1         ║"
+  echo "║ 🐳 Bun + FastAPI + Prisma + PG + Users Table    ║"
+  echo "╚════════════════════════════════════════════════╝"
+  echo -e "${NC}"
+}
+
+###########################################
+# 📦 Project Name
+###########################################
+PROJECT_NAME=$1
+[ -z "$PROJECT_NAME" ] && { echo -e "${RED}❌ Usage: docker-nextpy <project-name>${NC}"; exit 1; }
+
+###########################################
+# 🔀 Handle existing paths
+###########################################
+handle_existing() {
+  local path="$1"
+  if [ -e "$path" ]; then
+    echo -e "${YELLOW}⚠️  '$path' already exists.${NC}"
+    select choice in "Overwrite" "Keep" "Delete"; do
+      case $choice in
+        Overwrite)
+          echo "📝 Overwriting $path..."
+          rm -rf "$path"
+          mkdir -p "$path"
+          break
+          ;;
+        Keep)
+          echo "👌 Keeping existing $path"
+          break
+          ;;
+        Delete)
+          echo "🗑️ Deleting $path..."
+          rm -rf "$path"
+          read -r -p "Recreate '$path'? (y/n): " recreate
+          [[ "$recreate" =~ ^[Yy]$ ]] && mkdir -p "$path"
+          break
+          ;;
+      esac
+    done
+  else
+    mkdir -p "$path"
+  fi
+}
+
+###########################################
+# 🚀 INIT PROJECT
+###########################################
+banner
+mkdir -p "$PROJECT_NAME"
+cd "$PROJECT_NAME"
+ROOT_DIR=$(pwd)
+
+# Create main folders
+handle_existing "backend"
+handle_existing "frontend"
+mkdir -p backend/app/hooks backend/app/tests backend/prisma
+
+###########################################
+# 🧠 Backend Setup
+###########################################
+echo -e "${CYAN}📂 Setting up Python backend...${NC}"
+
+cat <<EOF > backend/.env
+DATABASE_URL=postgresql://appuser:apppassword@db:5432/appdb
+EOF
+
+cat <<EOF > backend/requirements.txt
+fastapi
+uvicorn[standard]
+python-dotenv
+prisma
+pydantic
+pytest
+pytest-asyncio
+httpx
+python-multipart
+EOF
+
+cat <<'EOF' > backend/Dockerfile
+FROM --platform=linux/amd64 python:3.11
+
+WORKDIR /app
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+
+RUN pip install --upgrade pip \
+ && pip install -r requirements.txt
+
+# Copy the rest of the application
+COPY . .
+
+# Generate Prisma client after schema is copied
+RUN prisma generate
+
+CMD ["uvicorn","app.main:app","--host","0.0.0.0","--port","8000","--reload"]
+EOF
+
+cat <<'EOF' > backend/pytest.ini
+[pytest]
+pythonpath = .
+EOF
+
+cat <<'EOF' > backend/prisma/schema.prisma
+generator client {
+  provider = "prisma-client-py"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String
+  email     String   @unique
+  password  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+EOF
+
+# Backend main, hooks, seed
+cat <<'EOF' > backend/app/__init__.py
+# Makes app a package for tests/imports.
+EOF
+
+cat <<'EOF' > backend/app/database.py
+from prisma import Prisma
+
+db = Prisma()
+EOF
+
+cat <<'EOF' > backend/app/main.py
+from fastapi import FastAPI, Form
+from fastapi.middleware.cors import CORSMiddleware
+import asyncio
+from contextlib import asynccontextmanager
+
+from app.hooks import user_hooks
+from app.database import db
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    while True:
+        try:
+            await db.connect()
+            await db.user.count()
+            print("✅ Database connected successfully")
+            break
+        except Exception:
+            print("⏳ Waiting for database...")
+            await asyncio.sleep(2)
+
+    yield
+
+    # Shutdown
+    await db.disconnect()
+
+
+app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/")
+async def root():
+    return {
+        "message": "Welcome to docker-nextpy API",
+        "docs": "/docs",
+        "users": "/users",
+    }
+
+
+@app.get("/users")
+async def users():
+    return await user_hooks.get_users()
+
+
+@app.post("/users")
+async def create_user(
+    name: str = Form(...),
+    email: str = Form(...),
+    password: str = Form(...),
+):
+    return await user_hooks.create_user(name, email, password)
+EOF
+
+cat <<'EOF' > backend/app/hooks/user_hooks.py
+from fastapi import HTTPException
+from app.database import db
+
+
+async def get_users():
+    try:
+        return await db.user.find_many(order={"id": "asc"})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def create_user(name: str, email: str, password: str):
+    try:
+        return await db.user.create(data={"name": name, "email": email, "password": password})
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+EOF
+
+cat <<'EOF' > backend/seed.py
+import asyncio
+from prisma import Prisma
+
+
+SEED_USERS = [
+    {"name": "Alice", "email": "alice@example.com", "password": "secret"},
+    {"name": "Bob", "email": "bob@example.com", "password": "secret"},
+    {"name": "Charlie", "email": "charlie@example.com", "password": "secret"},
+]
+
+
+async def main():
+    db = Prisma()
+    await db.connect()
+
+    try:
+        for user in SEED_USERS:
+            existing = await db.user.find_unique(where={"email": user["email"]})
+            if existing:
+                await db.user.update(
+                    where={"id": existing.id},
+                    data={"name": user["name"], "password": user["password"]},
+                )
+            else:
+                await db.user.create(data=user)
+        print("Seed completed successfully.")
+    finally:
+        await db.disconnect()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+EOF
+
+cat <<'EOF' > backend/app/tests/test_users.py
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+from app.main import app
+
+
+@pytest.mark.asyncio
+async def test_get_users():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.get("/users")
+    assert response.status_code == 200
+    assert isinstance(response.json(), list)
+EOF
+
+###########################################
+# 💻 Frontend Setup
+###########################################
+echo -e "${CYAN}📂 Setting up Next.js frontend...${NC}"
+SKIP_FRONTEND_CREATE=false
+
+if [ -e frontend/package.json ]; then
+  echo -e "${YELLOW}⚠️ 'frontend' already exists.${NC}"
+  select choice in "Overwrite" "Keep" "Delete"; do
+    case $choice in
+      Overwrite) rm -rf frontend; mkdir -p frontend; break ;;
+      Keep) SKIP_FRONTEND_CREATE=true; break ;;
+      Delete) rm -rf frontend; read -r -p "Recreate 'frontend'? (y/n): " r; [[ "$r" =~ ^[Yy]$ ]] && mkdir -p frontend; break ;;
+    esac
+  done
+fi
+
+if [ "$SKIP_FRONTEND_CREATE" != "true" ]; then
+  bun create next-app frontend \
+    --typescript --tailwind --eslint --app --import-alias="@/*" --skip-install --yes &
+
+  pid=$!
+  spinner "Generating Next.js frontend" "$pid"
+
+  [ ! -f frontend/package.json ] && { echo -e "${RED}❌ Frontend generation failed${NC}"; exit 1; }
+
+  cd frontend
+  bun install & spinner "Installing frontend dependencies"
+  bun pm trust --all
+
+  bun add framer-motion clsx & spinner "Adding Framer Motion and CLSX"
+
+  mkdir -p app/hooks app/tests app/types
+  rm -f next.config.ts
+  cat <<EOF > next.config.js
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  reactStrictMode: true
+}
+module.exports = nextConfig;
+EOF
+
+  # Modern Users Page
+  mkdir -p app
+  cat <<'EOF' > app/page.tsx
+'use client'
+
+import { useEffect, useState } from "react"
+import { motion, AnimatePresence } from "framer-motion"
+
+export type User = {
+  id: number
+  name: string
+  email: string
+}
+
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"
+
+async function getUsers(): Promise<User[]> {
+  const res = await fetch(`${API_BASE}/users`, { cache: "no-store" })
+  if (!res.ok) throw new Error("Failed to fetch users")
+  return res.json()
+}
+
+function UserCard({ user }: { user: User }) {
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -20 }}
+      whileHover={{ scale: 1.05 }}
+      className="bg-white shadow-lg rounded-xl p-6 border border-gray-200"
+    >
+      <h3 className="text-lg font-semibold text-gray-800">{user.name}</h3>
+      <p className="text-gray-500">{user.email}</p>
+    </motion.div>
+  )
+}
+
+export default function Page() {
+  const [users, setUsers] = useState<User[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    getUsers()
+      .then(setUsers)
+      .catch(console.error)
+      .finally(() => setLoading(false))
+  }, [])
+
+  return (
+    <main className="min-h-screen bg-slate-900 p-10">
+      <h1 className="text-4xl font-bold text-white mb-6">
+        Users Dashboard
+      </h1>
+
+      {loading ? (
+        <p className="text-white">Loading users...</p>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+          <AnimatePresence>
+            {users.map((user) => (
+              <UserCard key={user.id} user={user} />
+            ))}
+          </AnimatePresence>
+        </div>
+      )}
+    </main>
+  )
+}
+EOF
+
+  cd "$ROOT_DIR"
+fi
+
+###########################################
+# 🐳 Docker Compose
+###########################################
+cat <<EOF > docker-compose.yml
+services:
+  db:
+    platform: linux/amd64
+    image: postgres:16
+    environment:
+      POSTGRES_USER: appuser
+      POSTGRES_PASSWORD: apppassword
+      POSTGRES_DB: appdb
+    ports: ["5432:5432"]
+    volumes: [db_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL","pg_isready -U appuser"]
+      interval: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    env_file: ./backend/.env
+    volumes: ["./backend:/app"]
+    ports: ["8000:8000"]
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >
+      sh -c "prisma generate && prisma db push --accept-data-loss && python seed.py && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  frontend:
+    platform: linux/amd64
+    image: oven/bun
+    working_dir: /app
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    volumes: ["./frontend:/app"]
+    ports: ["3000:3000"]
+    command: >
+      sh -c "bun install && bun run dev --hostname 0.0.0.0"
+    depends_on: [backend]
+
+volumes:
+  db_data:
+EOF
+
+###########################################
+# 🚢 Launch Containers
+###########################################
+echo -e "${CYAN}🐳 Launching containers...${NC}"
+docker-compose up -d --build &
+spinner "Building containers"
+
+###########################################
+# ⏳ DB Wait Spinner
+###########################################
+echo -e "${CYAN}⏳ Waiting for database to be ready...${NC}"
+until docker-compose exec -T db pg_isready -U appuser &>/dev/null; do
+  printf "\r${YELLOW}⌛ Database warming up...${NC}"
+  sleep 1
+done
+echo -e "\r${GREEN}✔ Database ready!${NC}"
+
+###########################################
+# 🎉 Done
+###########################################
+echo -e "${GREEN}"
+echo "🎉 Project '$PROJECT_NAME' is ready!"
+echo "🌐 Frontend → http://localhost:3000"
+echo "🧠 Backend  → http://localhost:8000/users"
+echo "📚 Docs     → http://localhost:8000/docs"
+echo -e "${NC}"
+
