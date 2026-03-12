@@ -21,8 +21,14 @@ spinner() {
     printf "\r${CYAN}%s${NC} %s" "${spin:$i:1}" "$message"
     sleep .1
   done
-  wait "$pid" 2>/dev/null || true
-  printf "\r${GREEN}✔${NC} %s\n" "$message"
+  wait "$pid" 2>/dev/null
+  local status=$?
+  if [ "$status" -eq 0 ]; then
+    printf "\r${GREEN}✔${NC} %s\n" "$message"
+  else
+    printf "\r${RED}✖${NC} %s\n" "$message"
+  fi
+  return "$status"
 }
 
 banner() {
@@ -77,6 +83,149 @@ compose_cmd() {
   fi
 }
 
+port_available() {
+  local port="$1"
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$port" <<'PY'
+import socket, sys
+port = int(sys.argv[1])
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+  s.bind(("127.0.0.1", port))
+except OSError:
+  raise SystemExit(1)
+finally:
+  try:
+    s.close()
+  except Exception:
+    pass
+raise SystemExit(0)
+PY
+    return $?
+  fi
+
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1 && return 1
+    return 0
+  fi
+
+  # No reliable checker available; assume it's ok.
+  return 0
+}
+
+port_reserved() {
+  local port="$1"
+  shift || true
+  local reserved
+  for reserved in "${RESERVED_PORTS[@]}"; do
+    [ "$reserved" = "$port" ] && return 0
+  done
+  return 1
+}
+
+reserve_port() {
+  local port="$1"
+  RESERVED_PORTS+=("$port")
+}
+
+random_free_port() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - <<'PY'
+import socket
+import sys
+try:
+  s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+  s.bind(("127.0.0.1", 0))
+  print(s.getsockname()[1])
+  s.close()
+except OSError:
+  raise SystemExit(1)
+PY
+    return 0
+  fi
+  return 1
+}
+
+choose_port() {
+  local preferred="$1"
+  local label="$2"
+  local out_var="${3:-}"
+
+  if [ -z "$out_var" ]; then
+    echo -e "${RED}❌ choose_port missing out-var for ${label}.${NC}" >&2
+    exit 1
+  fi
+
+  local port="$preferred"
+  local tries=0
+
+  # Keep this fast: spawning python per port is expensive on macOS.
+  # Try a short contiguous range, then fall back to a random free port.
+  while [ "$tries" -lt 50 ]; do
+    if port_available "$port" && ! port_reserved "$port"; then
+      reserve_port "$port"
+      printf -v "$out_var" "%s" "$port"
+      return 0
+    fi
+    port=$((port + 1))
+    tries=$((tries + 1))
+  done
+
+  echo -e "${RED}❌ Could not find a free port for ${label} starting at ${preferred}.${NC}" >&2
+
+  if command -v python3 >/dev/null 2>&1; then
+    echo -e "${YELLOW}ℹ️  Falling back to a random free port for ${label}.${NC}" >&2
+    for _ in $(seq 1 50); do
+      port="$(random_free_port)" || break
+      if ! port_reserved "$port"; then
+        reserve_port "$port"
+        printf -v "$out_var" "%s" "$port"
+        return 0
+      fi
+    done
+  fi
+
+  echo -e "${YELLOW}⚠️  Using preferred port ${preferred} for ${label} (availability check failed).${NC}" >&2
+  printf -v "$out_var" "%s" "$preferred"
+  return 0
+}
+
+ensure_docker_running() {
+  command -v docker >/dev/null 2>&1 || {
+    echo -e "${RED}❌ Docker CLI not found. Install Docker Desktop (macOS) or Docker Engine.${NC}"
+    exit 1
+  }
+
+  if docker info >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo -e "${YELLOW}⚠️  Docker daemon is not running.${NC}"
+
+  if [[ "${OSTYPE:-}" == darwin* ]] && command -v open >/dev/null 2>&1; then
+    echo -e "${CYAN}▶ Starting Docker Desktop...${NC}"
+    open -a Docker >/dev/null 2>&1 || true
+
+    (
+      for _ in $(seq 1 180); do
+        docker info >/dev/null 2>&1 && exit 0
+        sleep 1
+      done
+      exit 1
+    ) & spinner "Waiting for Docker daemon" $! || {
+      echo -e "${RED}❌ Docker did not become ready within 3 minutes.${NC}"
+      echo -e "${YELLOW}Tip:${NC} open Docker Desktop, wait until it says “Engine running”, then rerun."
+      exit 1
+    }
+
+    return 0
+  fi
+
+  echo -e "${RED}❌ Start Docker, then rerun this script.${NC}"
+  exit 1
+}
+
 rand() {
   local n="${1:-24}"
   if command -v openssl >/dev/null 2>&1; then
@@ -128,6 +277,9 @@ cd "$PROJECT_NAME"
 
 ROOT_DIR="$(pwd)"
 COMPOSE="$(compose_cmd)"
+if [ "$START_AFTER" = true ]; then
+  ensure_docker_running
+fi
 
 handle_existing "config/prometheus/rules"
 handle_existing "config/alertmanager"
@@ -155,19 +307,62 @@ EOF
 ###########################################
 # 🔐 Env
 ###########################################
+RESERVED_PORTS=()
+
+DEFAULT_GRAFANA_PORT=3000
+DEFAULT_PROMETHEUS_PORT=9090
+DEFAULT_ALERTMANAGER_PORT=9093
+DEFAULT_MAILPIT_UI_PORT=8025
+DEFAULT_MINIO_PORT=9000
+DEFAULT_MINIO_CONSOLE_PORT=9001
+DEFAULT_DEMO_APP_PORT=8088
+
+choose_port "$DEFAULT_GRAFANA_PORT" "grafana" GRAFANA_PORT
+choose_port "$DEFAULT_PROMETHEUS_PORT" "prometheus" PROMETHEUS_PORT
+choose_port "$DEFAULT_ALERTMANAGER_PORT" "alertmanager" ALERTMANAGER_PORT
+choose_port "$DEFAULT_MAILPIT_UI_PORT" "mailpit" MAILPIT_UI_PORT
+choose_port "$DEFAULT_MINIO_PORT" "minio" MINIO_PORT
+choose_port "$DEFAULT_MINIO_CONSOLE_PORT" "minio-console" MINIO_CONSOLE_PORT
+choose_port "$DEFAULT_DEMO_APP_PORT" "demo-app" DEMO_APP_PORT
+
 MINIO_ROOT_PASSWORD="$(rand 16)"
 GRAFANA_ADMIN_PASSWORD="$(rand 12)"
 RESTIC_PASSWORD="$(rand 16)"
 
+echo -e "${CYAN}🔌 Selected ports:${NC}"
+echo "  Grafana:       ${GRAFANA_PORT}"
+echo "  Prometheus:    ${PROMETHEUS_PORT}"
+echo "  Alertmanager:  ${ALERTMANAGER_PORT}"
+echo "  Mailpit:       ${MAILPIT_UI_PORT}"
+echo "  MinIO API:     ${MINIO_PORT}"
+echo "  MinIO Console: ${MINIO_CONSOLE_PORT}"
+echo "  Demo app:      ${DEMO_APP_PORT}"
+echo
+
 cat <<EOF > .env
 # Localhost bindings (change ports if you have conflicts)
-GRAFANA_PORT=3000
-PROMETHEUS_PORT=9090
-ALERTMANAGER_PORT=9093
-MAILPIT_UI_PORT=8025
-MINIO_PORT=9000
-MINIO_CONSOLE_PORT=9001
-DEMO_APP_PORT=8088
+GRAFANA_PORT=${GRAFANA_PORT}
+PROMETHEUS_PORT=${PROMETHEUS_PORT}
+ALERTMANAGER_PORT=${ALERTMANAGER_PORT}
+MAILPIT_UI_PORT=${MAILPIT_UI_PORT}
+MINIO_PORT=${MINIO_PORT}
+MINIO_CONSOLE_PORT=${MINIO_CONSOLE_PORT}
+DEMO_APP_PORT=${DEMO_APP_PORT}
+
+# Image overrides (use if a registry is blocked or you have an internal mirror)
+PYTHON_IMAGE=python:3.12-slim
+PROMETHEUS_IMAGE=prom/prometheus:v2.52.0
+ALERTMANAGER_IMAGE=prom/alertmanager:v0.27.0
+GRAFANA_IMAGE=grafana/grafana:11.1.0
+LOKI_IMAGE=grafana/loki:3.1.1
+VECTOR_IMAGE=timberio/vector:0.41.1-alpine
+BLACKBOX_IMAGE=prom/blackbox-exporter:v0.25.0
+MAILPIT_IMAGE=axllent/mailpit:v1.21
+MINIO_IMAGE=minio/minio:RELEASE.2025-01-20T14-49-07Z
+MINIO_MC_IMAGE=minio/mc:RELEASE.2025-01-17T23-25-50Z
+LOADGEN_IMAGE=curlimages/curl:8.10.1
+RESTIC_IMAGE=restic/restic:0.17.1
+CADVISOR_IMAGE=ghcr.io/google/cadvisor:0.55.1
 
 # Grafana auth
 GRAFANA_ADMIN_USER=admin
@@ -191,6 +386,20 @@ MINIO_PORT=9000
 MINIO_CONSOLE_PORT=9001
 DEMO_APP_PORT=8088
 
+PYTHON_IMAGE=python:3.12-slim
+PROMETHEUS_IMAGE=prom/prometheus:v2.52.0
+ALERTMANAGER_IMAGE=prom/alertmanager:v0.27.0
+GRAFANA_IMAGE=grafana/grafana:11.1.0
+LOKI_IMAGE=grafana/loki:3.1.1
+VECTOR_IMAGE=timberio/vector:0.41.1-alpine
+BLACKBOX_IMAGE=prom/blackbox-exporter:v0.25.0
+MAILPIT_IMAGE=axllent/mailpit:v1.21
+MINIO_IMAGE=minio/minio:RELEASE.2025-01-20T14-49-07Z
+MINIO_MC_IMAGE=minio/mc:RELEASE.2025-01-17T23-25-50Z
+LOADGEN_IMAGE=curlimages/curl:8.10.1
+RESTIC_IMAGE=restic/restic:0.17.1
+CADVISOR_IMAGE=ghcr.io/google/cadvisor:0.55.1
+
 GRAFANA_ADMIN_USER=admin
 GRAFANA_ADMIN_PASSWORD=change-me
 
@@ -207,7 +416,7 @@ EOF
 cat <<'EOF' > docker-compose.yml
 services:
   prometheus:
-    image: prom/prometheus:v2.52.0
+    image: ${PROMETHEUS_IMAGE:-prom/prometheus:v2.52.0}
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
@@ -219,13 +428,12 @@ services:
       - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
     restart: unless-stopped
     depends_on:
-      - cadvisor
       - blackbox
       - demo-app
     networks: [ops]
 
   alertmanager:
-    image: prom/alertmanager:v0.27.0
+    image: ${ALERTMANAGER_IMAGE:-prom/alertmanager:v0.27.0}
     command:
       - "--config.file=/etc/alertmanager/alertmanager.yml"
     volumes:
@@ -236,7 +444,7 @@ services:
     networks: [ops]
 
   grafana:
-    image: grafana/grafana:11.1.0
+    image: ${GRAFANA_IMAGE:-grafana/grafana:11.1.0}
     environment:
       GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
       GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
@@ -253,7 +461,7 @@ services:
     networks: [ops]
 
   loki:
-    image: grafana/loki:3.1.1
+    image: ${LOKI_IMAGE:-grafana/loki:3.1.1}
     command: ["-config.file=/etc/loki/loki.yml"]
     volumes:
       - ./config/loki/loki.yml:/etc/loki/loki.yml:ro
@@ -262,7 +470,7 @@ services:
     networks: [ops]
 
   vector:
-    image: timberio/vector:0.41.1-alpine
+    image: ${VECTOR_IMAGE:-timberio/vector:0.41.1-alpine}
     command: ["--config", "/etc/vector/vector.toml"]
     volumes:
       - ./config/vector/vector.toml:/etc/vector/vector.toml:ro
@@ -272,7 +480,8 @@ services:
     networks: [ops]
 
   cadvisor:
-    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    image: ${CADVISOR_IMAGE:-ghcr.io/google/cadvisor:0.55.1}
+    profiles: ["extras"]
     privileged: true
     volumes:
       - /:/rootfs:ro
@@ -283,7 +492,7 @@ services:
     networks: [ops]
 
   blackbox:
-    image: prom/blackbox-exporter:v0.25.0
+    image: ${BLACKBOX_IMAGE:-prom/blackbox-exporter:v0.25.0}
     command: ["--config.file=/etc/blackbox/blackbox.yml"]
     volumes:
       - ./config/blackbox/blackbox.yml:/etc/blackbox/blackbox.yml:ro
@@ -291,7 +500,10 @@ services:
     networks: [ops]
 
   demo-app:
-    build: ./demo-app
+    build:
+      context: ./demo-app
+      args:
+        PYTHON_IMAGE: "${PYTHON_IMAGE:-python:3.12-slim}"
     environment:
       FAILURE_RATE: "0.05"
     ports:
@@ -300,14 +512,14 @@ services:
     networks: [ops]
 
   loadgen:
-    image: curlimages/curl:8.10.1
+    image: ${LOADGEN_IMAGE:-curlimages/curl:8.10.1}
     command: ["sh", "-c", "while true; do curl -fsS http://demo-app:8080/ >/dev/null || true; sleep 0.2; done"]
     restart: unless-stopped
     depends_on: [demo-app]
     networks: [ops]
 
   mailpit:
-    image: axllent/mailpit:v1.21
+    image: ${MAILPIT_IMAGE:-axllent/mailpit:v1.21}
     environment:
       MP_SMTP_AUTH_ACCEPT_ANY: "true"
       MP_SMTP_AUTH_ALLOW_INSECURE: "true"
@@ -318,7 +530,7 @@ services:
     networks: [ops]
 
   minio:
-    image: minio/minio:RELEASE.2025-01-20T14-49-07Z
+    image: ${MINIO_IMAGE:-minio/minio:RELEASE.2025-01-20T14-49-07Z}
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: "${MINIO_ROOT_USER:-minioadmin}"
@@ -332,7 +544,7 @@ services:
     networks: [ops]
 
   minio-init:
-    image: minio/mc:RELEASE.2025-01-17T23-25-50Z
+    image: ${MINIO_MC_IMAGE:-minio/mc:RELEASE.2025-01-17T23-25-50Z}
     depends_on: [minio]
     entrypoint: ["/bin/sh", "-c"]
     command: >
@@ -344,7 +556,7 @@ services:
 
   restic:
     profiles: ["tools"]
-    image: restic/restic:0.17.1
+    image: ${RESTIC_IMAGE:-restic/restic:0.17.1}
     environment:
       RESTIC_PASSWORD: "${RESTIC_PASSWORD}"
       AWS_ACCESS_KEY_ID: "${MINIO_ROOT_USER}"
@@ -479,12 +691,14 @@ datasources:
     type: prometheus
     access: proxy
     url: http://prometheus:9090
+    uid: PROM
     isDefault: true
 
   - name: Loki
     type: loki
     access: proxy
     url: http://loki:3100
+    uid: LOKI
 EOF
 
 cat <<'EOF' > config/grafana/provisioning/dashboards/dashboards.yml
@@ -498,6 +712,107 @@ providers:
     editable: false
     options:
       path: /etc/grafana/provisioning/dashboards
+EOF
+
+cat <<'EOF' > config/grafana/provisioning/dashboards/infraops-lab.json
+{
+  "uid": "infraops-lab",
+  "title": "InfraOps Lab",
+  "tags": ["infra", "ops", "lab"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "demo-app up",
+      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "PROM" },
+      "targets": [
+        { "expr": "max(up{job=\\\"demo-app\\\"})", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "red" }, { "color": "green", "value": 1 } ] } } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal" }
+    },
+    {
+      "type": "stat",
+      "title": "probe success",
+      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "PROM" },
+      "targets": [
+        { "expr": "min(probe_success)", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [ { "color": "red" }, { "color": "green", "value": 1 } ] } } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "horizontal" }
+    },
+    {
+      "type": "timeseries",
+      "title": "demo-app 5xx rate (%)",
+      "gridPos": { "x": 8, "y": 0, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "PROM" },
+      "targets": [
+        {
+          "expr": "100 * (sum(rate(demo_app_requests_total{status=~\\\"5..\\\"}[5m])) / clamp_min(sum(rate(demo_app_requests_total[5m])), 1))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "demo-app latency p95 (s)",
+      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "PROM" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(demo_app_request_duration_seconds_bucket{path=\\\"/\\\"}[5m])) by (le))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Top container CPU (rate/sec)",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "PROM" },
+      "targets": [
+        { "expr": "topk(10, sum(rate(container_cpu_usage_seconds_total{image!=\\\"\\\"}[5m])) by (name))", "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Top container memory (bytes)",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "PROM" },
+      "targets": [
+        { "expr": "topk(10, max(container_memory_working_set_bytes{image!=\\\"\\\"}) by (name))", "refId": "A" }
+      ]
+    },
+    {
+      "type": "logs",
+      "title": "demo-app logs",
+      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 10 },
+      "datasource": { "type": "loki", "uid": "LOKI" },
+      "targets": [
+        { "expr": "{service=\\\"demo-app\\\"}" , "refId": "A" }
+      ],
+      "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" }
+    }
+  ]
+}
 EOF
 
 ###########################################
@@ -546,7 +861,8 @@ docker_host = "unix:///var/run/docker.sock"
 type = "remap"
 inputs = ["docker_logs"]
 source = '''
-.service = .container_name
+.service = get!(.container_labels."com.docker.compose.service") ?? .container_name
+.project = get!(.container_labels."com.docker.compose.project") ?? "unknown"
 '''
 
 [sinks.loki]
@@ -557,6 +873,7 @@ encoding.codec = "json"
 labels.service = "{{ service }}"
 labels.container = "{{ container_name }}"
 labels.image = "{{ image }}"
+labels.project = "{{ project }}"
 EOF
 
 ###########################################
@@ -581,7 +898,8 @@ prometheus-client==0.21.0
 EOF
 
 cat <<'EOF' > demo-app/Dockerfile
-FROM python:3.12-slim
+ARG PYTHON_IMAGE=python:3.12-slim
+FROM ${PYTHON_IMAGE}
 
 WORKDIR /app
 
@@ -674,6 +992,158 @@ cat <<'EOF' > scripts/up.sh
 #!/usr/bin/env bash
 set -euo pipefail
 
+load_env() {
+  if [ -f ".env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . ".env"
+    set +a
+  fi
+}
+
+load_env
+
+port_available() {
+  local port="$1"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$port" <<'PY'
+import socket, sys
+port = int(sys.argv[1])
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+  s.bind(("127.0.0.1", port))
+except OSError:
+  raise SystemExit(1)
+finally:
+  try:
+    s.close()
+  except Exception:
+    pass
+raise SystemExit(0)
+PY
+    return $?
+  fi
+  return 0
+}
+
+random_free_port() {
+  python3 - <<'PY'
+import socket
+import sys
+try:
+  s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+  s.bind(("127.0.0.1", 0))
+  print(s.getsockname()[1])
+  s.close()
+except OSError:
+  raise SystemExit(1)
+PY
+}
+
+# Bash 3.2 + `set -u` treats empty arrays as "unbound" on expansion.
+# Seed with an empty element so "${RESERVED_PORTS[@]}" is always defined.
+RESERVED_PORTS=("")
+
+port_reserved() {
+  local port="$1"
+  local reserved
+  for reserved in "${RESERVED_PORTS[@]}"; do
+    [ -z "$reserved" ] && continue
+    [ "$reserved" = "$port" ] && return 0
+  done
+  return 1
+}
+
+reserve_port() {
+  local port="$1"
+  RESERVED_PORTS+=("$port")
+}
+
+set_env_kv() {
+  local key="$1"
+  local value="$2"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$key" "$value" <<'PY'
+import pathlib, sys
+key, value = sys.argv[1], sys.argv[2]
+path = pathlib.Path(".env")
+lines = path.read_text().splitlines() if path.exists() else []
+out = []
+found = False
+for line in lines:
+  if line.startswith(key + "="):
+    out.append(f"{key}={value}")
+    found = True
+  else:
+    out.append(line)
+if not found:
+  out.append(f"{key}={value}")
+path.write_text("\n".join(out) + "\n")
+PY
+    return 0
+  fi
+
+  # Fallback: append only (won't overwrite existing keys)
+  printf "%s=%s\n" "$key" "$value" >> .env
+}
+
+ensure_port_free() {
+  local key="$1"
+  local label="$2"
+  local preferred="${3:-}"
+
+  local current="${!key:-}"
+  local port="${current:-$preferred}"
+  local tries=0
+
+  while [ "$tries" -lt 50 ]; do
+    if port_available "$port" && ! port_reserved "$port"; then
+      export "$key=$port"
+      set_env_kv "$key" "$port"
+      reserve_port "$port"
+      return 0
+    fi
+    port=$((port + 1))
+    tries=$((tries + 1))
+  done
+
+  echo "Port range busy for ${label}, selecting a random free port..."
+  for _ in $(seq 1 50); do
+    port="$(random_free_port)"
+    if port_available "$port" && ! port_reserved "$port"; then
+      export "$key=$port"
+      set_env_kv "$key" "$port"
+      reserve_port "$port"
+      return 0
+    fi
+  done
+
+  echo "ERROR: Could not find a free port for ${label}." >&2
+  exit 1
+}
+
+ensure_docker_running() {
+  command -v docker >/dev/null 2>&1 || {
+    echo "ERROR: docker CLI not found." >&2
+    exit 1
+  }
+
+  docker info >/dev/null 2>&1 && return 0
+
+  echo "Docker daemon not running. Starting Docker Desktop..."
+  if [[ "${OSTYPE:-}" == darwin* ]] && command -v open >/dev/null 2>&1; then
+    open -a Docker >/dev/null 2>&1 || true
+  fi
+
+  for _ in $(seq 1 180); do
+    docker info >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+
+  echo "ERROR: Docker did not become ready within 3 minutes." >&2
+  exit 1
+}
+
 compose() {
   if docker compose version >/dev/null 2>&1; then
     docker compose "$@"
@@ -682,7 +1152,53 @@ compose() {
   fi
 }
 
-compose up -d --build
+WITH_EXTRAS=false
+NO_PULL=false
+NO_BUILD=false
+for arg in "$@"; do
+  case "$arg" in
+    --extras)
+      WITH_EXTRAS=true
+      ;;
+    --no-pull) NO_PULL=true ;;
+    --no-build) NO_BUILD=true ;;
+  esac
+done
+
+if [ -f "${IMAGES_CACHE_PATH:-backups/images-cache.tar}" ]; then
+  echo "Loading image cache: ${IMAGES_CACHE_PATH:-backups/images-cache.tar}"
+  docker load -i "${IMAGES_CACHE_PATH:-backups/images-cache.tar}" >/dev/null
+fi
+
+ensure_docker_running
+
+ensure_port_free GRAFANA_PORT "Grafana" 3000
+ensure_port_free PROMETHEUS_PORT "Prometheus" 9090
+ensure_port_free ALERTMANAGER_PORT "Alertmanager" 9093
+ensure_port_free MAILPIT_UI_PORT "Mailpit" 8025
+ensure_port_free MINIO_PORT "MinIO API" 9000
+ensure_port_free MINIO_CONSOLE_PORT "MinIO Console" 9001
+ensure_port_free DEMO_APP_PORT "Demo app" 8088
+
+if [ "$NO_PULL" = false ]; then
+  if [ "$WITH_EXTRAS" = true ]; then
+    bash scripts/pull-images.sh --extras
+  else
+    bash scripts/pull-images.sh
+  fi
+fi
+
+PROFILE_ARGS=""
+[ "$WITH_EXTRAS" = true ] && PROFILE_ARGS="--profile extras"
+
+BUILD_ARGS="--build"
+[ "$NO_BUILD" = true ] && BUILD_ARGS="--no-build"
+
+PULL_POLICY_ARGS=""
+[ "$NO_PULL" = true ] && PULL_POLICY_ARGS="--pull never"
+
+# shellcheck disable=SC2086
+compose $PROFILE_ARGS up -d $BUILD_ARGS $PULL_POLICY_ARGS
 
 echo
 echo "Grafana:       http://localhost:${GRAFANA_PORT:-3000} (user: ${GRAFANA_ADMIN_USER:-admin})"
@@ -691,6 +1207,141 @@ echo "Alertmanager:  http://localhost:${ALERTMANAGER_PORT:-9093}"
 echo "Mailpit:       http://localhost:${MAILPIT_UI_PORT:-8025}"
 echo "MinIO:         http://localhost:${MINIO_CONSOLE_PORT:-9001}"
 echo "Demo app:      http://localhost:${DEMO_APP_PORT:-8088}"
+EOF
+
+cat <<'EOF' > scripts/pull-images.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+load_env() {
+  if [ -f ".env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . ".env"
+    set +a
+  fi
+}
+
+load_env
+
+WITH_EXTRAS=false
+for arg in "$@"; do
+  case "$arg" in
+    --extras) WITH_EXTRAS=true ;;
+  esac
+done
+
+image_present() {
+  docker image inspect "$1" >/dev/null 2>&1
+}
+
+pull_with_retry() {
+  local image="$1"
+  local attempts="${PULL_ATTEMPTS:-6}"
+  local delay="${PULL_DELAY_SECONDS:-2}"
+  local i=1
+
+  while [ "$i" -le "$attempts" ]; do
+    echo "Pulling $image (attempt $i/$attempts)..."
+    if docker pull "$image"; then
+      return 0
+    fi
+    echo "Pull failed: $image"
+    echo "Retrying in ${delay}s..."
+    sleep "$delay"
+    delay=$((delay * 2))
+    i=$((i + 1))
+  done
+
+  echo "ERROR: Could not pull $image after $attempts attempts."
+  echo "If you see TLS handshake timeouts, your network/proxy/VPN is blocking registries."
+  echo "Workaround: switch network (hotspot), or preload an image cache with scripts/cache-images.sh and rerun."
+  return 1
+}
+
+images=(
+  "${PYTHON_IMAGE:-python:3.12-slim}"
+  "${PROMETHEUS_IMAGE:-prom/prometheus:v2.52.0}"
+  "${ALERTMANAGER_IMAGE:-prom/alertmanager:v0.27.0}"
+  "${GRAFANA_IMAGE:-grafana/grafana:11.1.0}"
+  "${LOKI_IMAGE:-grafana/loki:3.1.1}"
+  "${VECTOR_IMAGE:-timberio/vector:0.41.1-alpine}"
+  "${BLACKBOX_IMAGE:-prom/blackbox-exporter:v0.25.0}"
+  "${MAILPIT_IMAGE:-axllent/mailpit:v1.21}"
+  "${MINIO_IMAGE:-minio/minio:RELEASE.2025-01-20T14-49-07Z}"
+  "${MINIO_MC_IMAGE:-minio/mc:RELEASE.2025-01-17T23-25-50Z}"
+  "${LOADGEN_IMAGE:-curlimages/curl:8.10.1}"
+  "${RESTIC_IMAGE:-restic/restic:0.17.1}"
+)
+
+if [ "$WITH_EXTRAS" = true ]; then
+  images+=("${CADVISOR_IMAGE:-ghcr.io/google/cadvisor:0.55.1}")
+fi
+
+for img in "${images[@]}"; do
+  if image_present "$img"; then
+    echo "Already present: $img"
+    continue
+  fi
+  pull_with_retry "$img"
+done
+EOF
+
+cat <<'EOF' > scripts/cache-images.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+load_env() {
+  if [ -f ".env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . ".env"
+    set +a
+  fi
+}
+
+load_env
+
+OUT="backups/images-cache.tar"
+OPTS=()
+if [ "${1:-}" != "" ] && [[ "${1:-}" != -* ]]; then
+  OUT="$1"
+  shift
+fi
+OPTS=("$@")
+
+mkdir -p "$(dirname "$OUT")"
+
+echo "Prefetching images..."
+bash scripts/pull-images.sh "${OPTS[@]}"
+
+echo "Saving image cache to $OUT ..."
+
+# Keep in sync with pull-images.sh
+images=(
+  "${PYTHON_IMAGE:-python:3.12-slim}"
+  "${PROMETHEUS_IMAGE:-prom/prometheus:v2.52.0}"
+  "${ALERTMANAGER_IMAGE:-prom/alertmanager:v0.27.0}"
+  "${GRAFANA_IMAGE:-grafana/grafana:11.1.0}"
+  "${LOKI_IMAGE:-grafana/loki:3.1.1}"
+  "${VECTOR_IMAGE:-timberio/vector:0.41.1-alpine}"
+  "${BLACKBOX_IMAGE:-prom/blackbox-exporter:v0.25.0}"
+  "${MAILPIT_IMAGE:-axllent/mailpit:v1.21}"
+  "${MINIO_IMAGE:-minio/minio:RELEASE.2025-01-20T14-49-07Z}"
+  "${MINIO_MC_IMAGE:-minio/mc:RELEASE.2025-01-17T23-25-50Z}"
+  "${LOADGEN_IMAGE:-curlimages/curl:8.10.1}"
+  "${RESTIC_IMAGE:-restic/restic:0.17.1}"
+)
+
+for opt in "${OPTS[@]}"; do
+  if [ "$opt" = "--extras" ]; then
+    images+=("${CADVISOR_IMAGE:-ghcr.io/google/cadvisor:0.55.1}")
+    break
+  fi
+done
+
+docker save -o "$OUT" "${images[@]}"
+echo "Done."
 EOF
 
 cat <<'EOF' > scripts/down.sh
@@ -712,6 +1363,17 @@ cat <<'EOF' > scripts/smoke-test.sh
 #!/usr/bin/env bash
 set -euo pipefail
 
+load_env() {
+  if [ -f ".env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . ".env"
+    set +a
+  fi
+}
+
+load_env
+
 require() {
   command -v "$1" >/dev/null 2>&1 || { echo "Missing dependency: $1"; exit 1; }
 }
@@ -730,9 +1392,184 @@ curl -fsS "http://localhost:${GRAFANA_PORT:-3000}/api/health" >/dev/null
 echo "OK"
 EOF
 
+cat <<'EOF' > scripts/demo.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+load_env() {
+  if [ -f ".env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . ".env"
+    set +a
+  fi
+}
+
+load_env
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || { echo "Missing dependency: $1"; exit 1; }
+}
+
+require curl
+require python3
+
+compose() {
+  if docker compose version >/dev/null 2>&1; then
+    docker compose "$@"
+  else
+    docker-compose "$@"
+  fi
+}
+
+PROM_URL="http://localhost:${PROMETHEUS_PORT:-9090}"
+
+prom_result_count() {
+  local q="$1"
+  local raw
+  raw="$(curl -fsS -G --data-urlencode "query=${q}" "${PROM_URL}/api/v1/query" 2>/dev/null || true)"
+  printf "%s" "$raw" | python3 - <<'PY'
+import json, sys
+raw = sys.stdin.read().strip()
+if not raw:
+  print(0)
+  raise SystemExit(0)
+try:
+  data = json.loads(raw)
+except json.JSONDecodeError:
+  print(0)
+  raise SystemExit(0)
+res = data.get("data", {}).get("result", [])
+print(len(res))
+PY
+}
+
+wait_for() {
+  local timeout="$1"
+  local interval="$2"
+  local desc="$3"
+  shift 3
+
+  echo "Waiting: ${desc} (timeout ${timeout}s)..."
+  local start
+  start="$(date +%s)"
+  while true; do
+    if "$@"; then
+      echo "OK: ${desc}"
+      return 0
+    fi
+    if [ $(( $(date +%s) - start )) -ge "$timeout" ]; then
+      echo "TIMEOUT: ${desc}"
+      return 1
+    fi
+    sleep "$interval"
+  done
+}
+
+ALERT_QUERY='ALERTS{alertname="DemoAppDown",alertstate="firing"}'
+
+demo_health_ok() {
+  curl -fsS "http://localhost:${DEMO_APP_PORT:-8088}/health" >/dev/null 2>&1
+}
+
+demo_health_down() {
+  ! demo_health_ok
+}
+
+alert_is_firing() {
+  [ "$(prom_result_count "${ALERT_QUERY}")" -ge 1 ]
+}
+
+alert_is_clear() {
+  [ "$(prom_result_count "${ALERT_QUERY}")" -eq 0 ]
+}
+
+cleanup() {
+  compose start demo-app >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+WITH_EXTRAS=false
+NO_PULL=false
+NO_BUILD=false
+for arg in "$@"; do
+  case "$arg" in
+    --extras) WITH_EXTRAS=true ;;
+    --no-pull) NO_PULL=true ;;
+    --no-build) NO_BUILD=true ;;
+  esac
+done
+
+echo "1) Ensuring stack is up..."
+UP_NO_BUILD=""
+if [ "$NO_BUILD" = true ]; then
+  UP_NO_BUILD="--no-build"
+fi
+
+if [ "$WITH_EXTRAS" = true ] && [ "$NO_PULL" = true ]; then
+  # shellcheck disable=SC2086
+  bash scripts/up.sh --extras --no-pull $UP_NO_BUILD
+elif [ "$WITH_EXTRAS" = true ]; then
+  # shellcheck disable=SC2086
+  bash scripts/up.sh --extras $UP_NO_BUILD
+elif [ "$NO_PULL" = true ]; then
+  # shellcheck disable=SC2086
+  bash scripts/up.sh --no-pull $UP_NO_BUILD
+else
+  # shellcheck disable=SC2086
+  bash scripts/up.sh $UP_NO_BUILD
+fi
+bash scripts/smoke-test.sh
+
+echo
+echo "2) Triggering incident (stop demo-app)..."
+compose stop demo-app >/dev/null 2>&1 || true
+
+wait_for 30 2 "demo-app /health DOWN" demo_health_down || true
+wait_for 240 5 "DemoAppDown alert firing" alert_is_firing || {
+  echo
+  echo "Triage hints:"
+  echo "- Prometheus:    http://localhost:${PROMETHEUS_PORT:-9090}"
+  echo "- Alertmanager:  http://localhost:${ALERTMANAGER_PORT:-9093}"
+  echo "- Demo health:   http://localhost:${DEMO_APP_PORT:-8088}/health"
+  exit 1
+}
+
+echo
+echo "3) Verify notification + dashboards:"
+echo "- Alertmanager:  http://localhost:${ALERTMANAGER_PORT:-9093}"
+echo "- Mailpit:       http://localhost:${MAILPIT_UI_PORT:-8025}"
+echo "- Grafana:       http://localhost:${GRAFANA_PORT:-3000}"
+echo
+
+echo "4) Recovering (start demo-app)..."
+compose start demo-app >/dev/null 2>&1 || true
+
+wait_for 60 2 "demo-app /health OK" demo_health_ok
+wait_for 240 5 "DemoAppDown alert cleared" alert_is_clear || true
+
+echo
+echo "5) Final smoke test..."
+bash scripts/smoke-test.sh
+
+echo
+echo "Done."
+EOF
+
 cat <<'EOF' > scripts/triage-bundle.sh
 #!/usr/bin/env bash
 set -euo pipefail
+
+load_env() {
+  if [ -f ".env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . ".env"
+    set +a
+  fi
+}
+
+load_env
 
 compose() {
   if docker compose version >/dev/null 2>&1; then
@@ -778,6 +1615,17 @@ EOF
 cat <<'EOF' > scripts/capacity-report.sh
 #!/usr/bin/env bash
 set -euo pipefail
+
+load_env() {
+  if [ -f ".env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . ".env"
+    set +a
+  fi
+}
+
+load_env
 
 require() {
   command -v "$1" >/dev/null 2>&1 || { echo "Missing dependency: $1"; exit 1; }
@@ -895,6 +1743,40 @@ bash scripts/up.sh
 bash scripts/smoke-test.sh
 \`\`\`
 
+## Start without rebuild/pull (if already running once)
+
+\`\`\`bash
+bash scripts/up.sh --no-build --no-pull
+\`\`\`
+
+## One-command incident demo (interview)
+
+\`\`\`bash
+bash scripts/demo.sh
+\`\`\`
+
+## If your network blocks Docker registries
+
+Create an offline image cache on a network that can pull images:
+
+\`\`\`bash
+bash scripts/cache-images.sh backups/images-cache.tar
+\`\`\`
+
+Then on the restricted network, keep that file next to the project and run:
+
+\`\`\`bash
+IMAGES_CACHE_PATH=backups/images-cache.tar bash scripts/up.sh --no-pull
+\`\`\`
+
+## Optional: container-level CPU/memory metrics
+
+This uses cAdvisor (extra profile). Some networks block pulling from GHCR.
+
+\`\`\`bash
+bash scripts/up.sh --extras
+\`\`\`
+
 ## What this demonstrates
 
 - Monitoring: Prometheus + cAdvisor + blackbox probes
@@ -917,8 +1799,10 @@ cat <<'EOF' > docs/RUNBOOK.md
 ## Start / Stop
 
 - Start: `bash scripts/up.sh`
+- Start (+cAdvisor extras): `bash scripts/up.sh --extras`
 - Stop: `bash scripts/down.sh`
 - Smoke test: `bash scripts/smoke-test.sh`
+- Interview demo drill: `bash scripts/demo.sh`
 
 ## Alert drill (simulate an incident)
 
@@ -1016,9 +1900,7 @@ echo -e "${CYAN}🧾 Generated project at:${NC} ${ROOT_DIR}"
 echo -e "${CYAN}🧾 Compose command detected:${NC} ${COMPOSE}"
 
 if [ "$START_AFTER" = true ]; then
-  (
-    $COMPOSE up -d --build
-  ) & spinner "Starting Infra Ops Lab (compose up -d --build)" $!
+  bash scripts/up.sh
   echo
   echo -e "${GREEN}Done.${NC} Try:"
   echo "  cd \"$PROJECT_NAME\""
@@ -1026,3 +1908,4 @@ if [ "$START_AFTER" = true ]; then
 else
   echo -e "${YELLOW}Skipped auto-start (--no-start).${NC}"
 fi
+

@@ -1,0 +1,17 @@
+global:
+  smtp_smarthost: "mailpit:1025"
+  smtp_from: "alertmanager@ops.local"
+  smtp_require_tls: false
+
+route:
+  receiver: "email-oncall"
+  group_by: ["alertname", "job"]
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 2h
+
+receivers:
+  - name: "email-oncall"
+    email_configs:
+      - to: "oncall@ops.local"
+        send_resolved: true

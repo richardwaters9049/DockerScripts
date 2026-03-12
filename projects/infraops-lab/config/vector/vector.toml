@@ -1,0 +1,21 @@
+[sources.docker_logs]
+type = "docker_logs"
+docker_host = "unix:///var/run/docker.sock"
+
+[transforms.add_service]
+type = "remap"
+inputs = ["docker_logs"]
+source = '''
+.service = get!(.container_labels."com.docker.compose.service") ?? .container_name
+.project = get!(.container_labels."com.docker.compose.project") ?? "unknown"
+'''
+
+[sinks.loki]
+type = "loki"
+inputs = ["add_service"]
+endpoint = "http://loki:3100"
+encoding.codec = "json"
+labels.service = "{{ service }}"
+labels.container = "{{ container_name }}"
+labels.image = "{{ image }}"
+labels.project = "{{ project }}"

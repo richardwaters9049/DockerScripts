@@ -1,0 +1,166 @@
+services:
+  prometheus:
+    image: ${PROMETHEUS_IMAGE:-prom/prometheus:v2.52.0}
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    restart: unless-stopped
+    depends_on:
+      - blackbox
+      - demo-app
+    networks: [ops]
+
+  alertmanager:
+    image: ${ALERTMANAGER_IMAGE:-prom/alertmanager:v0.27.0}
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+    volumes:
+      - ./config/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "127.0.0.1:${ALERTMANAGER_PORT:-9093}:9093"
+    restart: unless-stopped
+    networks: [ops]
+
+  grafana:
+    image: ${GRAFANA_IMAGE:-grafana/grafana:11.1.0}
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+      - loki
+    networks: [ops]
+
+  loki:
+    image: ${LOKI_IMAGE:-grafana/loki:3.1.1}
+    command: ["-config.file=/etc/loki/loki.yml"]
+    volumes:
+      - ./config/loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki_data:/loki
+    restart: unless-stopped
+    networks: [ops]
+
+  vector:
+    image: ${VECTOR_IMAGE:-timberio/vector:0.41.1-alpine}
+    command: ["--config", "/etc/vector/vector.toml"]
+    volumes:
+      - ./config/vector/vector.toml:/etc/vector/vector.toml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    depends_on: [loki]
+    networks: [ops]
+
+  cadvisor:
+    image: ${CADVISOR_IMAGE:-ghcr.io/google/cadvisor:0.55.1}
+    profiles: ["extras"]
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    restart: unless-stopped
+    networks: [ops]
+
+  blackbox:
+    image: ${BLACKBOX_IMAGE:-prom/blackbox-exporter:v0.25.0}
+    command: ["--config.file=/etc/blackbox/blackbox.yml"]
+    volumes:
+      - ./config/blackbox/blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    restart: unless-stopped
+    networks: [ops]
+
+  demo-app:
+    build:
+      context: ./demo-app
+      args:
+        PYTHON_IMAGE: "${PYTHON_IMAGE:-python:3.12-slim}"
+    environment:
+      FAILURE_RATE: "0.05"
+    ports:
+      - "127.0.0.1:${DEMO_APP_PORT:-8088}:8080"
+    restart: unless-stopped
+    networks: [ops]
+
+  loadgen:
+    image: ${LOADGEN_IMAGE:-curlimages/curl:8.10.1}
+    command: ["sh", "-c", "while true; do curl -fsS http://demo-app:8080/ >/dev/null || true; sleep 0.2; done"]
+    restart: unless-stopped
+    depends_on: [demo-app]
+    networks: [ops]
+
+  mailpit:
+    image: ${MAILPIT_IMAGE:-axllent/mailpit:v1.21}
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+    ports:
+      - "127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"
+      - "127.0.0.1:1025:1025"
+    restart: unless-stopped
+    networks: [ops]
+
+  minio:
+    image: ${MINIO_IMAGE:-minio/minio:RELEASE.2025-01-20T14-49-07Z}
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-minioadmin}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-minioadmin}"
+    volumes:
+      - minio_data:/data
+    ports:
+      - "127.0.0.1:${MINIO_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+    restart: unless-stopped
+    networks: [ops]
+
+  minio-init:
+    image: ${MINIO_MC_IMAGE:-minio/mc:RELEASE.2025-01-17T23-25-50Z}
+    depends_on: [minio]
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "until mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} >/dev/null 2>&1; do sleep 1; done;
+       mc mb --ignore-existing local/${MINIO_BUCKET_RESTIC};
+       mc anonymous set none local/${MINIO_BUCKET_RESTIC};
+       echo '✅ MinIO bucket ready: ${MINIO_BUCKET_RESTIC}'"
+    networks: [ops]
+
+  restic:
+    profiles: ["tools"]
+    image: ${RESTIC_IMAGE:-restic/restic:0.17.1}
+    environment:
+      RESTIC_PASSWORD: "${RESTIC_PASSWORD}"
+      AWS_ACCESS_KEY_ID: "${MINIO_ROOT_USER}"
+      AWS_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD}"
+      RESTIC_REPOSITORY: "s3:http://minio:9000/${MINIO_BUCKET_RESTIC}/repo"
+    volumes:
+      - prometheus_data:/data/prometheus:ro
+      - grafana_data:/data/grafana:ro
+      - loki_data:/data/loki:ro
+      - ./config:/data/config:ro
+      - ./backups:/restore
+    depends_on: [minio-init]
+    networks: [ops]
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  loki_data:
+  minio_data:
+
+networks:
+  ops:
+    driver: bridge

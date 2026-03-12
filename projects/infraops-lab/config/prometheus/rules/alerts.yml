@@ -1,0 +1,25 @@
+groups:
+  - name: demo-app
+    rules:
+      - alert: DemoAppDown
+        expr: up{job="demo-app"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "demo-app is down"
+          description: "Prometheus cannot scrape demo-app for 2 minutes."
+
+      - alert: DemoAppHigh5xxRate
+        expr: |
+          (
+            sum(rate(demo_app_requests_total{status=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(demo_app_requests_total[5m])), 1)
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High 5xx rate on demo-app"
+          description: "More than 5% of requests are 5xx over the last 5 minutes."
