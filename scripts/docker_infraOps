@@ -1,0 +1,1028 @@
+#!/usr/bin/env bash
+set -e
+
+###########################################
+# 🎨 Colors & Spinner Utilities
+###########################################
+RED="\033[0;31m"
+GREEN="\033[0;32m"
+CYAN="\033[0;36m"
+PURPLE="\033[0;35m"
+YELLOW="\033[1;33m"
+NC="\033[0m"
+
+spinner() {
+  local message=$1
+  local pid=${2:-$!}
+  local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+  local i=0
+  while kill -0 "$pid" 2>/dev/null; do
+    i=$(( (i+1) % 10 ))
+    printf "\r${CYAN}%s${NC} %s" "${spin:$i:1}" "$message"
+    sleep .1
+  done
+  wait "$pid" 2>/dev/null || true
+  printf "\r${GREEN}✔${NC} %s\n" "$message"
+}
+
+banner() {
+  echo -e "${PURPLE}"
+  echo "╔══════════════════════════════════════════════════════╗"
+  echo "║ 🛠️  docker-infraOps — INFRA OPS LAB v1.0             ║"
+  echo "║ 📈 Metrics + Logs + Alerts + Backups + Object Store  ║"
+  echo "╚══════════════════════════════════════════════════════╝"
+  echo -e "${NC}"
+}
+
+###########################################
+# 🧩 Args
+###########################################
+PROJECT_NAME=""
+START_AFTER=true
+
+usage() {
+  echo -e "${RED}❌ Usage:${NC} bash scripts/docker_infraOps <project-name> [--no-start]"
+}
+
+if [ $# -lt 1 ]; then
+  usage
+  exit 1
+fi
+
+for arg in "$@"; do
+  case "$arg" in
+    --no-start) START_AFTER=false ;;
+    -*)
+      usage
+      exit 1
+      ;;
+    *)
+      if [ -z "$PROJECT_NAME" ]; then
+        PROJECT_NAME="$arg"
+      fi
+      ;;
+  esac
+done
+
+[ -z "$PROJECT_NAME" ] && { usage; exit 1; }
+
+###########################################
+# 🧰 Helpers
+###########################################
+compose_cmd() {
+  if docker compose version >/dev/null 2>&1; then
+    echo "docker compose"
+  else
+    echo "docker-compose"
+  fi
+}
+
+rand() {
+  local n="${1:-24}"
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex "$n"
+    return 0
+  fi
+  python3 - <<PY
+import secrets
+print(secrets.token_hex(${n}))
+PY
+}
+
+handle_existing() {
+  local path="$1"
+  if [ -e "$path" ]; then
+    echo -e "${YELLOW}⚠️  '$path' already exists.${NC}"
+    select choice in "Overwrite" "Keep" "Delete"; do
+      case $choice in
+        Overwrite)
+          echo "📝 Overwriting $path..."
+          rm -rf "$path"
+          mkdir -p "$path"
+          break
+          ;;
+        Keep)
+          echo "👌 Keeping existing $path"
+          break
+          ;;
+        Delete)
+          echo "🗑️ Deleting $path..."
+          rm -rf "$path"
+          read -r -p "Recreate '$path'? (y/n): " recreate
+          [[ "$recreate" =~ ^[Yy]$ ]] && mkdir -p "$path"
+          break
+          ;;
+      esac
+    done
+  else
+    mkdir -p "$path"
+  fi
+}
+
+###########################################
+# 🚀 INIT PROJECT
+###########################################
+banner
+handle_existing "$PROJECT_NAME"
+cd "$PROJECT_NAME"
+
+ROOT_DIR="$(pwd)"
+COMPOSE="$(compose_cmd)"
+
+handle_existing "config/prometheus/rules"
+handle_existing "config/alertmanager"
+handle_existing "config/grafana/provisioning/datasources"
+handle_existing "config/grafana/provisioning/dashboards"
+handle_existing "config/loki"
+handle_existing "config/vector"
+handle_existing "config/blackbox"
+handle_existing "demo-app"
+handle_existing "docs"
+handle_existing "scripts"
+handle_existing "backups"
+
+###########################################
+# 🧾 Git hygiene
+###########################################
+cat <<'EOF' > .gitignore
+.env
+backups/
+data/
+*.log
+.DS_Store
+EOF
+
+###########################################
+# 🔐 Env
+###########################################
+MINIO_ROOT_PASSWORD="$(rand 16)"
+GRAFANA_ADMIN_PASSWORD="$(rand 12)"
+RESTIC_PASSWORD="$(rand 16)"
+
+cat <<EOF > .env
+# Localhost bindings (change ports if you have conflicts)
+GRAFANA_PORT=3000
+PROMETHEUS_PORT=9090
+ALERTMANAGER_PORT=9093
+MAILPIT_UI_PORT=8025
+MINIO_PORT=9000
+MINIO_CONSOLE_PORT=9001
+DEMO_APP_PORT=8088
+
+# Grafana auth
+GRAFANA_ADMIN_USER=admin
+GRAFANA_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+
+# MinIO (S3-compatible object storage)
+MINIO_ROOT_USER=minioadmin
+MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+MINIO_BUCKET_RESTIC=restic
+
+# Restic (backup encryption password)
+RESTIC_PASSWORD=${RESTIC_PASSWORD}
+EOF
+
+cat <<'EOF' > .env.example
+GRAFANA_PORT=3000
+PROMETHEUS_PORT=9090
+ALERTMANAGER_PORT=9093
+MAILPIT_UI_PORT=8025
+MINIO_PORT=9000
+MINIO_CONSOLE_PORT=9001
+DEMO_APP_PORT=8088
+
+GRAFANA_ADMIN_USER=admin
+GRAFANA_ADMIN_PASSWORD=change-me
+
+MINIO_ROOT_USER=minioadmin
+MINIO_ROOT_PASSWORD=change-me
+MINIO_BUCKET_RESTIC=restic
+
+RESTIC_PASSWORD=change-me
+EOF
+
+###########################################
+# 🐳 Compose
+###########################################
+cat <<'EOF' > docker-compose.yml
+services:
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    restart: unless-stopped
+    depends_on:
+      - cadvisor
+      - blackbox
+      - demo-app
+    networks: [ops]
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+    volumes:
+      - ./config/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "127.0.0.1:${ALERTMANAGER_PORT:-9093}:9093"
+    restart: unless-stopped
+    networks: [ops]
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+      - loki
+    networks: [ops]
+
+  loki:
+    image: grafana/loki:3.1.1
+    command: ["-config.file=/etc/loki/loki.yml"]
+    volumes:
+      - ./config/loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki_data:/loki
+    restart: unless-stopped
+    networks: [ops]
+
+  vector:
+    image: timberio/vector:0.41.1-alpine
+    command: ["--config", "/etc/vector/vector.toml"]
+    volumes:
+      - ./config/vector/vector.toml:/etc/vector/vector.toml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    depends_on: [loki]
+    networks: [ops]
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    restart: unless-stopped
+    networks: [ops]
+
+  blackbox:
+    image: prom/blackbox-exporter:v0.25.0
+    command: ["--config.file=/etc/blackbox/blackbox.yml"]
+    volumes:
+      - ./config/blackbox/blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    restart: unless-stopped
+    networks: [ops]
+
+  demo-app:
+    build: ./demo-app
+    environment:
+      FAILURE_RATE: "0.05"
+    ports:
+      - "127.0.0.1:${DEMO_APP_PORT:-8088}:8080"
+    restart: unless-stopped
+    networks: [ops]
+
+  loadgen:
+    image: curlimages/curl:8.10.1
+    command: ["sh", "-c", "while true; do curl -fsS http://demo-app:8080/ >/dev/null || true; sleep 0.2; done"]
+    restart: unless-stopped
+    depends_on: [demo-app]
+    networks: [ops]
+
+  mailpit:
+    image: axllent/mailpit:v1.21
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+    ports:
+      - "127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"
+      - "127.0.0.1:1025:1025"
+    restart: unless-stopped
+    networks: [ops]
+
+  minio:
+    image: minio/minio:RELEASE.2025-01-20T14-49-07Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-minioadmin}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-minioadmin}"
+    volumes:
+      - minio_data:/data
+    ports:
+      - "127.0.0.1:${MINIO_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+    restart: unless-stopped
+    networks: [ops]
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-01-17T23-25-50Z
+    depends_on: [minio]
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "until mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} >/dev/null 2>&1; do sleep 1; done;
+       mc mb --ignore-existing local/${MINIO_BUCKET_RESTIC};
+       mc anonymous set none local/${MINIO_BUCKET_RESTIC};
+       echo '✅ MinIO bucket ready: ${MINIO_BUCKET_RESTIC}'"
+    networks: [ops]
+
+  restic:
+    profiles: ["tools"]
+    image: restic/restic:0.17.1
+    environment:
+      RESTIC_PASSWORD: "${RESTIC_PASSWORD}"
+      AWS_ACCESS_KEY_ID: "${MINIO_ROOT_USER}"
+      AWS_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD}"
+      RESTIC_REPOSITORY: "s3:http://minio:9000/${MINIO_BUCKET_RESTIC}/repo"
+    volumes:
+      - prometheus_data:/data/prometheus:ro
+      - grafana_data:/data/grafana:ro
+      - loki_data:/data/loki:ro
+      - ./config:/data/config:ro
+      - ./backups:/restore
+    depends_on: [minio-init]
+    networks: [ops]
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  loki_data:
+  minio_data:
+
+networks:
+  ops:
+    driver: bridge
+EOF
+
+###########################################
+# 📈 Prometheus
+###########################################
+cat <<'EOF' > config/prometheus/prometheus.yml
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["prometheus:9090"]
+
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["cadvisor:8080"]
+
+  - job_name: demo-app
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["demo-app:8080"]
+
+  - job_name: blackbox-http
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - http://demo-app:8080/health
+          - http://grafana:3000/api/health
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
+EOF
+
+cat <<'EOF' > config/prometheus/rules/alerts.yml
+groups:
+  - name: demo-app
+    rules:
+      - alert: DemoAppDown
+        expr: up{job="demo-app"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "demo-app is down"
+          description: "Prometheus cannot scrape demo-app for 2 minutes."
+
+      - alert: DemoAppHigh5xxRate
+        expr: |
+          (
+            sum(rate(demo_app_requests_total{status=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(demo_app_requests_total[5m])), 1)
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High 5xx rate on demo-app"
+          description: "More than 5% of requests are 5xx over the last 5 minutes."
+EOF
+
+###########################################
+# 🚨 Alertmanager
+###########################################
+cat <<'EOF' > config/alertmanager/alertmanager.yml
+global:
+  smtp_smarthost: "mailpit:1025"
+  smtp_from: "alertmanager@ops.local"
+  smtp_require_tls: false
+
+route:
+  receiver: "email-oncall"
+  group_by: ["alertname", "job"]
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 2h
+
+receivers:
+  - name: "email-oncall"
+    email_configs:
+      - to: "oncall@ops.local"
+        send_resolved: true
+EOF
+
+###########################################
+# 📊 Grafana provisioning
+###########################################
+cat <<'EOF' > config/grafana/provisioning/datasources/datasources.yml
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+EOF
+
+cat <<'EOF' > config/grafana/provisioning/dashboards/dashboards.yml
+apiVersion: 1
+
+providers:
+  - name: default
+    folder: InfraOps Lab
+    type: file
+    disableDeletion: true
+    editable: false
+    options:
+      path: /etc/grafana/provisioning/dashboards
+EOF
+
+###########################################
+# 🧱 Loki
+###########################################
+cat <<'EOF' > config/loki/loki.yml
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  retention_period: 168h
+EOF
+
+###########################################
+# 🧾 Vector (Docker logs → Loki)
+###########################################
+cat <<'EOF' > config/vector/vector.toml
+[sources.docker_logs]
+type = "docker_logs"
+docker_host = "unix:///var/run/docker.sock"
+
+[transforms.add_service]
+type = "remap"
+inputs = ["docker_logs"]
+source = '''
+.service = .container_name
+'''
+
+[sinks.loki]
+type = "loki"
+inputs = ["add_service"]
+endpoint = "http://loki:3100"
+encoding.codec = "json"
+labels.service = "{{ service }}"
+labels.container = "{{ container_name }}"
+labels.image = "{{ image }}"
+EOF
+
+###########################################
+# 🩺 Blackbox
+###########################################
+cat <<'EOF' > config/blackbox/blackbox.yml
+modules:
+  http_2xx:
+    prober: http
+    timeout: 5s
+    http:
+      valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
+      method: GET
+      preferred_ip_protocol: ip4
+EOF
+
+###########################################
+# 🧪 Demo app (metrics + failure injection)
+###########################################
+cat <<'EOF' > demo-app/requirements.txt
+prometheus-client==0.21.0
+EOF
+
+cat <<'EOF' > demo-app/Dockerfile
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY server.py .
+
+EXPOSE 8080
+CMD ["python", "server.py"]
+EOF
+
+cat <<'EOF' > demo-app/server.py
+import os
+import random
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+
+
+FAILURE_RATE = float(os.getenv("FAILURE_RATE", "0.05"))
+
+REQUESTS = Counter(
+    "demo_app_requests_total",
+    "Total HTTP requests served by the demo app",
+    labelnames=("path", "status"),
+)
+LATENCY = Histogram(
+    "demo_app_request_duration_seconds",
+    "HTTP request latency (seconds)",
+    labelnames=("path",),
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5),
+)
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "demo-app/1.0"
+
+    def log_message(self, fmt, *args):
+        # Keep logs clean and structured-ish.
+        message = fmt % args
+        print(f'{{"ts":{time.time():.3f},"msg":{message!r},"path":{self.path!r}}}')
+
+    def _write(self, status: int, body: bytes, content_type: str = "text/plain; charset=utf-8"):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?", 1)[0]
+
+        if path == "/health":
+            with LATENCY.labels(path="/health").time():
+                REQUESTS.labels(path="/health", status="200").inc()
+                self._write(200, b"ok\n")
+            return
+
+        if path == "/metrics":
+            body = generate_latest()
+            REQUESTS.labels(path="/metrics", status="200").inc()
+            self._write(200, body, CONTENT_TYPE_LATEST)
+            return
+
+        start = time.perf_counter()
+        try:
+            if random.random() < FAILURE_RATE:
+                REQUESTS.labels(path="/", status="500").inc()
+                self._write(500, b"simulated error\n")
+                return
+
+            REQUESTS.labels(path="/", status="200").inc()
+            self._write(200, b"hello from demo-app\n")
+        finally:
+            LATENCY.labels(path="/").observe(time.perf_counter() - start)
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", "8080"))
+    print(f"Starting demo-app on 0.0.0.0:{port} (FAILURE_RATE={FAILURE_RATE})")
+    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+EOF
+
+###########################################
+# 🧰 Project scripts
+###########################################
+cat <<'EOF' > scripts/up.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+compose() {
+  if docker compose version >/dev/null 2>&1; then
+    docker compose "$@"
+  else
+    docker-compose "$@"
+  fi
+}
+
+compose up -d --build
+
+echo
+echo "Grafana:       http://localhost:${GRAFANA_PORT:-3000} (user: ${GRAFANA_ADMIN_USER:-admin})"
+echo "Prometheus:    http://localhost:${PROMETHEUS_PORT:-9090}"
+echo "Alertmanager:  http://localhost:${ALERTMANAGER_PORT:-9093}"
+echo "Mailpit:       http://localhost:${MAILPIT_UI_PORT:-8025}"
+echo "MinIO:         http://localhost:${MINIO_CONSOLE_PORT:-9001}"
+echo "Demo app:      http://localhost:${DEMO_APP_PORT:-8088}"
+EOF
+
+cat <<'EOF' > scripts/down.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+compose() {
+  if docker compose version >/dev/null 2>&1; then
+    docker compose "$@"
+  else
+    docker-compose "$@"
+  fi
+}
+
+compose down
+EOF
+
+cat <<'EOF' > scripts/smoke-test.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || { echo "Missing dependency: $1"; exit 1; }
+}
+
+require curl
+
+echo "Checking demo-app..."
+curl -fsS "http://localhost:${DEMO_APP_PORT:-8088}/health" >/dev/null
+
+echo "Checking Prometheus..."
+curl -fsS "http://localhost:${PROMETHEUS_PORT:-9090}/-/ready" >/dev/null
+
+echo "Checking Grafana..."
+curl -fsS "http://localhost:${GRAFANA_PORT:-3000}/api/health" >/dev/null
+
+echo "OK"
+EOF
+
+cat <<'EOF' > scripts/triage-bundle.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+compose() {
+  if docker compose version >/dev/null 2>&1; then
+    docker compose "$@"
+  else
+    docker-compose "$@"
+  fi
+}
+
+mkdir -p backups
+ts="$(date -u +%Y%m%dT%H%M%SZ)"
+out="backups/triage-$ts.txt"
+
+{
+  echo "# InfraOps Lab triage bundle"
+  echo "timestamp_utc=$ts"
+  echo
+  echo "## docker"
+  docker version || true
+  echo
+  echo "## compose"
+  docker compose version 2>/dev/null || docker-compose version 2>/dev/null || true
+  echo
+  echo "## compose ps"
+  compose ps || true
+  echo
+  echo "## health checks"
+  curl -fsS "http://localhost:${DEMO_APP_PORT:-8088}/health" >/dev/null && echo "demo-app=ok" || echo "demo-app=fail"
+  curl -fsS "http://localhost:${PROMETHEUS_PORT:-9090}/-/ready" >/dev/null && echo "prometheus=ok" || echo "prometheus=fail"
+  curl -fsS "http://localhost:${GRAFANA_PORT:-3000}/api/health" >/dev/null && echo "grafana=ok" || echo "grafana=fail"
+  echo
+  echo "## recent logs (tail 120)"
+  for svc in prometheus alertmanager grafana loki vector demo-app minio; do
+    echo
+    echo "--- service=$svc ---"
+    compose logs --tail 120 "$svc" 2>/dev/null || true
+  done
+} >"$out"
+
+echo "Wrote $out"
+EOF
+
+cat <<'EOF' > scripts/capacity-report.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || { echo "Missing dependency: $1"; exit 1; }
+}
+
+require curl
+require python3
+
+PROM_URL="${PROM_URL:-http://localhost:${PROMETHEUS_PORT:-9090}}"
+
+query() {
+  local q="$1"
+  python3 - <<PY
+import json, sys, urllib.parse, subprocess
+prom = ${PROM_URL!r}
+q = ${q!r}
+url = prom + "/api/v1/query?query=" + urllib.parse.quote(q, safe="")
+raw = subprocess.check_output(["curl","-fsS",url])
+data = json.loads(raw)
+if data.get("status") != "success":
+  print("query_failed", file=sys.stderr)
+  sys.exit(1)
+for r in data["data"]["result"]:
+  metric = r.get("metric", {})
+  name = metric.get("name") or metric.get("container") or metric.get("instance") or metric.get("__name__") or "unknown"
+  value = r.get("value", ["", ""])[1]
+  print(f"{name}\t{value}")
+PY
+}
+
+echo "Top CPU (container rate/sec, 5m window):"
+query 'topk(10, sum(rate(container_cpu_usage_seconds_total{image!=""}[5m])) by (name))' || true
+echo
+echo "Top memory (bytes):"
+query 'topk(10, max(container_memory_working_set_bytes{image!=""}) by (name))' || true
+EOF
+
+cat <<'EOF' > scripts/backup-init.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+compose() {
+  if docker compose version >/dev/null 2>&1; then
+    docker compose "$@"
+  else
+    docker-compose "$@"
+  fi
+}
+
+compose --profile tools run --rm restic snapshots >/dev/null 2>&1 && {
+  echo "Restic repo already initialised."
+  exit 0
+}
+
+compose --profile tools run --rm restic init
+EOF
+
+cat <<'EOF' > scripts/backup.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+compose() {
+  if docker compose version >/dev/null 2>&1; then
+    docker compose "$@"
+  else
+    docker-compose "$@"
+  fi
+}
+
+ts="$(date -u +%Y%m%dT%H%M%SZ)"
+compose --profile tools run --rm restic backup /data --tag "infraops-lab" --tag "$ts"
+compose --profile tools run --rm restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune
+EOF
+
+cat <<'EOF' > scripts/restore-latest.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+compose() {
+  if docker compose version >/dev/null 2>&1; then
+    docker compose "$@"
+  else
+    docker-compose "$@"
+  fi
+}
+
+mkdir -p backups/restore-latest
+compose --profile tools run --rm restic restore latest --target /restore/restore-latest
+echo "Restored into ./backups/restore-latest"
+EOF
+
+###########################################
+# 📚 Docs (light stub; full runbook in docs/)
+###########################################
+cat <<EOF > README.md
+# ${PROJECT_NAME}
+
+Infra Ops Lab: metrics, logging, alerting, and backup/restore using Docker Compose.
+
+## Why this is “3rd-line infra” aligned
+
+- Incident drills (simulate service down / elevated 5xx → alert → triage → recovery)
+- Monitoring + synthetic probes (Prometheus + blackbox exporter)
+- Logging pipeline (Vector → Loki → Grafana)
+- DR basics (Restic encrypted snapshots to S3-compatible MinIO + restore workflow)
+- Documentation/runbooks (service catalog + postmortem template)
+
+## Quick start
+
+\`\`\`bash
+cp .env.example .env
+# edit secrets/ports if desired
+
+bash scripts/up.sh
+bash scripts/smoke-test.sh
+\`\`\`
+
+## What this demonstrates
+
+- Monitoring: Prometheus + cAdvisor + blackbox probes
+- Alerting: Alertmanager → Mailpit (local SMTP inbox)
+- Logging: Vector (Docker logs) → Loki → Grafana
+- Object storage: MinIO (S3-compatible)
+- Backups: Restic snapshots to MinIO + restore flow
+
+## Security defaults
+
+- All UIs bind to \`127.0.0.1\` (not exposed to your LAN by default).
+- Secrets live in \`.env\` and are gitignored; commit \`.env.example\` only.
+
+See \`docs/RUNBOOK.md\`, \`docs/SERVICE_CATALOG.md\`, and \`docs/POSTMORTEM_TEMPLATE.md\`.
+EOF
+
+cat <<'EOF' > docs/RUNBOOK.md
+# Runbook (Infra Ops Lab)
+
+## Start / Stop
+
+- Start: `bash scripts/up.sh`
+- Stop: `bash scripts/down.sh`
+- Smoke test: `bash scripts/smoke-test.sh`
+
+## Alert drill (simulate an incident)
+
+1. Confirm metrics ingest: open Prometheus UI and search for `up`.
+2. View email alerts: open Mailpit UI.
+3. Break the service:
+   - `docker compose stop demo-app`
+4. Observe:
+   - Prometheus: `up{job="demo-app"}` drops to `0`
+   - Alertmanager: `DemoAppDown` fires after 2 minutes
+   - Mailpit: receives alert email
+5. Restore service:
+   - `docker compose start demo-app`
+
+## Backup / Restore drill (DR)
+
+1. Initialise repo (first time):
+   - `bash scripts/backup-init.sh`
+2. Create snapshot:
+   - `bash scripts/backup.sh`
+3. Restore latest snapshot to local folder:
+   - `bash scripts/restore-latest.sh`
+
+## Triage checklist (3rd-line mindset)
+
+- Identify blast radius (which services / which users)
+- Validate monitoring signal (is it real vs noisy?)
+- Check logs (Grafana → Loki)
+- Mitigate (restart/rollback) and confirm recovery
+- Capture timeline and permanent fix action
+
+## Useful tooling
+
+- Triage snapshot bundle: `bash scripts/triage-bundle.sh`
+- Capacity snapshot (Prometheus API): `bash scripts/capacity-report.sh`
+EOF
+
+cat <<'EOF' > docs/SERVICE_CATALOG.md
+# Service Catalog (Infra Ops Lab)
+
+## Core services
+
+- `prometheus` — Metrics collection and alert rule evaluation.
+- `alertmanager` — Alert routing to email (Mailpit).
+- `grafana` — Dashboards; data sources provisioned for Prometheus + Loki.
+- `loki` — Log store queried from Grafana.
+- `vector` — Collects Docker logs and ships them to Loki.
+- `minio` — S3-compatible object storage (used as Restic backend).
+
+## Supporting services
+
+- `cadvisor` — Container metrics for capacity/behaviour insight.
+- `blackbox` — Synthetic probes for service availability.
+- `demo-app` — Metrics-emitting app with failure injection (incident drill target).
+- `loadgen` — Generates steady traffic to demo-app.
+- `mailpit` — Local SMTP + web UI for alert notifications.
+- `restic` — One-shot backup/restore tool (profile: `tools`).
+EOF
+
+cat <<'EOF' > docs/POSTMORTEM_TEMPLATE.md
+# Incident Postmortem Template
+
+## Summary
+
+- Incident ID:
+- Date/time (UTC):
+- Severity:
+- Customer impact:
+
+## Timeline (UTC)
+
+- T+00:00 Detect (alert / user report)
+- T+00:05 Triage
+- T+00:15 Mitigation applied
+- T+00:30 Service restored
+
+## Root cause
+
+## What went well
+
+## What went poorly
+
+## Action items
+
+- [ ] Prevention:
+- [ ] Detection:
+- [ ] Documentation:
+- [ ] Automation:
+EOF
+
+###########################################
+# ▶️ Optional start
+###########################################
+echo -e "${CYAN}🧾 Generated project at:${NC} ${ROOT_DIR}"
+echo -e "${CYAN}🧾 Compose command detected:${NC} ${COMPOSE}"
+
+if [ "$START_AFTER" = true ]; then
+  (
+    $COMPOSE up -d --build
+  ) & spinner "Starting Infra Ops Lab (compose up -d --build)" $!
+  echo
+  echo -e "${GREEN}Done.${NC} Try:"
+  echo "  cd \"$PROJECT_NAME\""
+  echo "  bash scripts/smoke-test.sh"
+else
+  echo -e "${YELLOW}Skipped auto-start (--no-start).${NC}"
+fi

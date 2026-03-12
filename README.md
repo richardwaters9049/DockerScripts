@@ -53,6 +53,7 @@ Given a project name, each script:
 | `scripts/docker_pyNext` | Base starter | Fast bootstrap with users + training API pattern |
 | `scripts/docker_pyNext_v2` | UI-rich starter | Includes animated users dashboard setup |
 | `scripts/docker_pyNext_v3` | Recommended default | Most stable flow, improved test setup, cleaner API base config |
+| `scripts/docker_infraOps` | Infra engineer demo | Prometheus + Grafana + Loki + Alertmanager + MinIO + Restic lab |
 
 Recommendation: use `scripts/docker_pyNext_v3` for new projects unless you need older behavior.
 
