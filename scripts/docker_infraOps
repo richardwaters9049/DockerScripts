@@ -17,7 +17,7 @@ spinner() {
   local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
   local i=0
   while kill -0 "$pid" 2>/dev/null; do
-    i=$(( (i+1) % 10 ))
+    i=$(((i + 1) % 10))
     printf "\r${CYAN}%s${NC} %s" "${spin:$i:1}" "$message"
     sleep .1
   done
@@ -57,20 +57,23 @@ fi
 
 for arg in "$@"; do
   case "$arg" in
-    --no-start) START_AFTER=false ;;
-    -*)
-      usage
-      exit 1
-      ;;
-    *)
-      if [ -z "$PROJECT_NAME" ]; then
-        PROJECT_NAME="$arg"
-      fi
-      ;;
+  --no-start) START_AFTER=false ;;
+  -*)
+    usage
+    exit 1
+    ;;
+  *)
+    if [ -z "$PROJECT_NAME" ]; then
+      PROJECT_NAME="$arg"
+    fi
+    ;;
   esac
 done
 
-[ -z "$PROJECT_NAME" ] && { usage; exit 1; }
+[ -z "$PROJECT_NAME" ] && {
+  usage
+  exit 1
+}
 
 ###########################################
 # 🧰 Helpers
@@ -213,7 +216,8 @@ ensure_docker_running() {
         sleep 1
       done
       exit 1
-    ) & spinner "Waiting for Docker daemon" $! || {
+    ) &
+    spinner "Waiting for Docker daemon" $! || {
       echo -e "${RED}❌ Docker did not become ready within 3 minutes.${NC}"
       echo -e "${YELLOW}Tip:${NC} open Docker Desktop, wait until it says “Engine running”, then rerun."
       exit 1
@@ -244,23 +248,23 @@ handle_existing() {
     echo -e "${YELLOW}⚠️  '$path' already exists.${NC}"
     select choice in "Overwrite" "Keep" "Delete"; do
       case $choice in
-        Overwrite)
-          echo "📝 Overwriting $path..."
-          rm -rf "$path"
-          mkdir -p "$path"
-          break
-          ;;
-        Keep)
-          echo "👌 Keeping existing $path"
-          break
-          ;;
-        Delete)
-          echo "🗑️ Deleting $path..."
-          rm -rf "$path"
-          read -r -p "Recreate '$path'? (y/n): " recreate
-          [[ "$recreate" =~ ^[Yy]$ ]] && mkdir -p "$path"
-          break
-          ;;
+      Overwrite)
+        echo "📝 Overwriting $path..."
+        rm -rf "$path"
+        mkdir -p "$path"
+        break
+        ;;
+      Keep)
+        echo "👌 Keeping existing $path"
+        break
+        ;;
+      Delete)
+        echo "🗑️ Deleting $path..."
+        rm -rf "$path"
+        read -r -p "Recreate '$path'? (y/n): " recreate
+        [[ "$recreate" =~ ^[Yy]$ ]] && mkdir -p "$path"
+        break
+        ;;
       esac
     done
   else
@@ -296,7 +300,7 @@ handle_existing "backups"
 ###########################################
 # 🧾 Git hygiene
 ###########################################
-cat <<'EOF' > .gitignore
+cat <<'EOF' >.gitignore
 .env
 backups/
 data/
@@ -339,7 +343,7 @@ echo "  MinIO Console: ${MINIO_CONSOLE_PORT}"
 echo "  Demo app:      ${DEMO_APP_PORT}"
 echo
 
-cat <<EOF > .env
+cat <<EOF >.env
 # Localhost bindings (change ports if you have conflicts)
 GRAFANA_PORT=${GRAFANA_PORT}
 PROMETHEUS_PORT=${PROMETHEUS_PORT}
@@ -377,7 +381,7 @@ MINIO_BUCKET_RESTIC=restic
 RESTIC_PASSWORD=${RESTIC_PASSWORD}
 EOF
 
-cat <<'EOF' > .env.example
+cat <<'EOF' >.env.example
 GRAFANA_PORT=3000
 PROMETHEUS_PORT=9090
 ALERTMANAGER_PORT=9093
@@ -413,7 +417,7 @@ EOF
 ###########################################
 # 🐳 Compose
 ###########################################
-cat <<'EOF' > docker-compose.yml
+cat <<'EOF' >docker-compose.yml
 services:
   prometheus:
     image: ${PROMETHEUS_IMAGE:-prom/prometheus:v2.52.0}
@@ -585,7 +589,7 @@ EOF
 ###########################################
 # 📈 Prometheus
 ###########################################
-cat <<'EOF' > config/prometheus/prometheus.yml
+cat <<'EOF' >config/prometheus/prometheus.yml
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
@@ -629,7 +633,7 @@ scrape_configs:
         replacement: blackbox:9115
 EOF
 
-cat <<'EOF' > config/prometheus/rules/alerts.yml
+cat <<'EOF' >config/prometheus/rules/alerts.yml
 groups:
   - name: demo-app
     rules:
@@ -660,7 +664,7 @@ EOF
 ###########################################
 # 🚨 Alertmanager
 ###########################################
-cat <<'EOF' > config/alertmanager/alertmanager.yml
+cat <<'EOF' >config/alertmanager/alertmanager.yml
 global:
   smtp_smarthost: "mailpit:1025"
   smtp_from: "alertmanager@ops.local"
@@ -683,7 +687,7 @@ EOF
 ###########################################
 # 📊 Grafana provisioning
 ###########################################
-cat <<'EOF' > config/grafana/provisioning/datasources/datasources.yml
+cat <<'EOF' >config/grafana/provisioning/datasources/datasources.yml
 apiVersion: 1
 
 datasources:
@@ -701,7 +705,7 @@ datasources:
     uid: LOKI
 EOF
 
-cat <<'EOF' > config/grafana/provisioning/dashboards/dashboards.yml
+cat <<'EOF' >config/grafana/provisioning/dashboards/dashboards.yml
 apiVersion: 1
 
 providers:
@@ -714,7 +718,7 @@ providers:
       path: /etc/grafana/provisioning/dashboards
 EOF
 
-cat <<'EOF' > config/grafana/provisioning/dashboards/infraops-lab.json
+cat <<'EOF' >config/grafana/provisioning/dashboards/infraops-lab.json
 {
   "uid": "infraops-lab",
   "title": "InfraOps Lab",
@@ -818,7 +822,7 @@ EOF
 ###########################################
 # 🧱 Loki
 ###########################################
-cat <<'EOF' > config/loki/loki.yml
+cat <<'EOF' >config/loki/loki.yml
 auth_enabled: false
 
 server:
@@ -852,7 +856,7 @@ EOF
 ###########################################
 # 🧾 Vector (Docker logs → Loki)
 ###########################################
-cat <<'EOF' > config/vector/vector.toml
+cat <<'EOF' >config/vector/vector.toml
 [sources.docker_logs]
 type = "docker_logs"
 docker_host = "unix:///var/run/docker.sock"
@@ -879,7 +883,7 @@ EOF
 ###########################################
 # 🩺 Blackbox
 ###########################################
-cat <<'EOF' > config/blackbox/blackbox.yml
+cat <<'EOF' >config/blackbox/blackbox.yml
 modules:
   http_2xx:
     prober: http
@@ -893,11 +897,11 @@ EOF
 ###########################################
 # 🧪 Demo app (metrics + failure injection)
 ###########################################
-cat <<'EOF' > demo-app/requirements.txt
+cat <<'EOF' >demo-app/requirements.txt
 prometheus-client==0.21.0
 EOF
 
-cat <<'EOF' > demo-app/Dockerfile
+cat <<'EOF' >demo-app/Dockerfile
 ARG PYTHON_IMAGE=python:3.12-slim
 FROM ${PYTHON_IMAGE}
 
@@ -912,7 +916,7 @@ EXPOSE 8080
 CMD ["python", "server.py"]
 EOF
 
-cat <<'EOF' > demo-app/server.py
+cat <<'EOF' >demo-app/server.py
 import os
 import random
 import time
@@ -988,9 +992,13 @@ EOF
 ###########################################
 # 🧰 Project scripts
 ###########################################
-cat <<'EOF' > scripts/up.sh
+cat <<'EOF' >scripts/up.sh
 #!/usr/bin/env bash
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT_DIR"
 
 load_env() {
   if [ -f ".env" ]; then
@@ -1182,9 +1190,9 @@ ensure_port_free DEMO_APP_PORT "Demo app" 8088
 
 if [ "$NO_PULL" = false ]; then
   if [ "$WITH_EXTRAS" = true ]; then
-    bash scripts/pull-images.sh --extras
+    bash "$SCRIPT_DIR/pull-images.sh" --extras
   else
-    bash scripts/pull-images.sh
+    bash "$SCRIPT_DIR/pull-images.sh"
   fi
 fi
 
@@ -1209,9 +1217,13 @@ echo "MinIO:         http://localhost:${MINIO_CONSOLE_PORT:-9001}"
 echo "Demo app:      http://localhost:${DEMO_APP_PORT:-8088}"
 EOF
 
-cat <<'EOF' > scripts/pull-images.sh
+cat <<'EOF' >scripts/pull-images.sh
 #!/usr/bin/env bash
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT_DIR"
 
 load_env() {
   if [ -f ".env" ]; then
@@ -1287,9 +1299,13 @@ for img in "${images[@]}"; do
 done
 EOF
 
-cat <<'EOF' > scripts/cache-images.sh
+cat <<'EOF' >scripts/cache-images.sh
 #!/usr/bin/env bash
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT_DIR"
 
 load_env() {
   if [ -f ".env" ]; then
@@ -1313,7 +1329,7 @@ OPTS=("$@")
 mkdir -p "$(dirname "$OUT")"
 
 echo "Prefetching images..."
-bash scripts/pull-images.sh "${OPTS[@]}"
+bash "$SCRIPT_DIR/pull-images.sh" "${OPTS[@]}"
 
 echo "Saving image cache to $OUT ..."
 
@@ -1344,9 +1360,13 @@ docker save -o "$OUT" "${images[@]}"
 echo "Done."
 EOF
 
-cat <<'EOF' > scripts/down.sh
+cat <<'EOF' >scripts/down.sh
 #!/usr/bin/env bash
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT_DIR"
 
 compose() {
   if docker compose version >/dev/null 2>&1; then
@@ -1359,9 +1379,13 @@ compose() {
 compose down
 EOF
 
-cat <<'EOF' > scripts/smoke-test.sh
+cat <<'EOF' >scripts/smoke-test.sh
 #!/usr/bin/env bash
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT_DIR"
 
 load_env() {
   if [ -f ".env" ]; then
@@ -1392,9 +1416,13 @@ curl -fsS "http://localhost:${GRAFANA_PORT:-3000}/api/health" >/dev/null
 echo "OK"
 EOF
 
-cat <<'EOF' > scripts/demo.sh
+cat <<'EOF' >scripts/demo.sh
 #!/usr/bin/env bash
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT_DIR"
 
 load_env() {
   if [ -f ".env" ]; then
@@ -1508,18 +1536,18 @@ fi
 
 if [ "$WITH_EXTRAS" = true ] && [ "$NO_PULL" = true ]; then
   # shellcheck disable=SC2086
-  bash scripts/up.sh --extras --no-pull $UP_NO_BUILD
+  bash "$SCRIPT_DIR/up.sh" --extras --no-pull $UP_NO_BUILD
 elif [ "$WITH_EXTRAS" = true ]; then
   # shellcheck disable=SC2086
-  bash scripts/up.sh --extras $UP_NO_BUILD
+  bash "$SCRIPT_DIR/up.sh" --extras $UP_NO_BUILD
 elif [ "$NO_PULL" = true ]; then
   # shellcheck disable=SC2086
-  bash scripts/up.sh --no-pull $UP_NO_BUILD
+  bash "$SCRIPT_DIR/up.sh" --no-pull $UP_NO_BUILD
 else
   # shellcheck disable=SC2086
-  bash scripts/up.sh $UP_NO_BUILD
+  bash "$SCRIPT_DIR/up.sh" $UP_NO_BUILD
 fi
-bash scripts/smoke-test.sh
+bash "$SCRIPT_DIR/smoke-test.sh"
 
 echo
 echo "2) Triggering incident (stop demo-app)..."
@@ -1550,15 +1578,19 @@ wait_for 240 5 "DemoAppDown alert cleared" alert_is_clear || true
 
 echo
 echo "5) Final smoke test..."
-bash scripts/smoke-test.sh
+bash "$SCRIPT_DIR/smoke-test.sh"
 
 echo
 echo "Done."
 EOF
 
-cat <<'EOF' > scripts/triage-bundle.sh
+cat <<'EOF' >scripts/triage-bundle.sh
 #!/usr/bin/env bash
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT_DIR"
 
 load_env() {
   if [ -f ".env" ]; then
@@ -1612,9 +1644,13 @@ out="backups/triage-$ts.txt"
 echo "Wrote $out"
 EOF
 
-cat <<'EOF' > scripts/capacity-report.sh
+cat <<'EOF' >scripts/capacity-report.sh
 #!/usr/bin/env bash
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT_DIR"
 
 load_env() {
   if [ -f ".env" ]; then
@@ -1663,9 +1699,13 @@ echo "Top memory (bytes):"
 query 'topk(10, max(container_memory_working_set_bytes{image!=""}) by (name))' || true
 EOF
 
-cat <<'EOF' > scripts/backup-init.sh
+cat <<'EOF' >scripts/backup-init.sh
 #!/usr/bin/env bash
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT_DIR"
 
 compose() {
   if docker compose version >/dev/null 2>&1; then
@@ -1683,9 +1723,13 @@ compose --profile tools run --rm restic snapshots >/dev/null 2>&1 && {
 compose --profile tools run --rm restic init
 EOF
 
-cat <<'EOF' > scripts/backup.sh
+cat <<'EOF' >scripts/backup.sh
 #!/usr/bin/env bash
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT_DIR"
 
 compose() {
   if docker compose version >/dev/null 2>&1; then
@@ -1700,9 +1744,13 @@ compose --profile tools run --rm restic backup /data --tag "infraops-lab" --tag 
 compose --profile tools run --rm restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune
 EOF
 
-cat <<'EOF' > scripts/restore-latest.sh
+cat <<'EOF' >scripts/restore-latest.sh
 #!/usr/bin/env bash
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT_DIR"
 
 compose() {
   if docker compose version >/dev/null 2>&1; then
@@ -1720,7 +1768,7 @@ EOF
 ###########################################
 # 📚 Docs (light stub; full runbook in docs/)
 ###########################################
-cat <<EOF > README.md
+cat <<EOF >README.md
 # ${PROJECT_NAME}
 
 Infra Ops Lab: metrics, logging, alerting, and backup/restore using Docker Compose.
@@ -1793,7 +1841,7 @@ bash scripts/up.sh --extras
 See \`docs/RUNBOOK.md\`, \`docs/SERVICE_CATALOG.md\`, and \`docs/POSTMORTEM_TEMPLATE.md\`.
 EOF
 
-cat <<'EOF' > docs/RUNBOOK.md
+cat <<'EOF' >docs/RUNBOOK.md
 # Runbook (Infra Ops Lab)
 
 ## Start / Stop
@@ -1840,7 +1888,7 @@ cat <<'EOF' > docs/RUNBOOK.md
 - Capacity snapshot (Prometheus API): `bash scripts/capacity-report.sh`
 EOF
 
-cat <<'EOF' > docs/SERVICE_CATALOG.md
+cat <<'EOF' >docs/SERVICE_CATALOG.md
 # Service Catalog (Infra Ops Lab)
 
 ## Core services
@@ -1862,7 +1910,7 @@ cat <<'EOF' > docs/SERVICE_CATALOG.md
 - `restic` — One-shot backup/restore tool (profile: `tools`).
 EOF
 
-cat <<'EOF' > docs/POSTMORTEM_TEMPLATE.md
+cat <<'EOF' >docs/POSTMORTEM_TEMPLATE.md
 # Incident Postmortem Template
 
 ## Summary
@@ -1908,4 +1956,3 @@ if [ "$START_AFTER" = true ]; then
 else
   echo -e "${YELLOW}Skipped auto-start (--no-start).${NC}"
 fi
-
