@@ -1,0 +1,23 @@
+# macOS
+.DS_Store
+
+# Projects directory
+projects/
+
+# Node
+node_modules/
+.next/
+
+# Rust
+target/
+
+# Environment files
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log

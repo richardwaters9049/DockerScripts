@@ -2,7 +2,14 @@ FROM docker:27-cli
 
 RUN apk add --no-cache bash curl unzip libstdc++ libgcc
 RUN curl -fsSL https://bun.sh/install | bash
-ENV PATH="/root/.bun/bin:${PATH}"
+ENV PATH="/root/.bun/bin:${PATH}" \
+    NON_INTERACTIVE=1 \
+    EXISTING_PATH_MODE=overwrite \
+    WORKSPACE_ROOT=/workspace
+
+LABEL org.opencontainers.image.title="docker-pynext" \
+      org.opencontainers.image.description="Non-interactive Docker image for generating Bun + FastAPI + Prisma + Postgres starter stacks" \
+      org.opencontainers.image.source="https://github.com/richardwaters9049/DockerScripts"
 
 COPY scripts/docker_pyNext_v3 /usr/local/bin/docker_pyNext_v3
 COPY dockerhub-entrypoint.sh /usr/local/bin/dockerhub-entrypoint.sh
