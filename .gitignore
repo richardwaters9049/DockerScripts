@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# Dock-Rust generated projects
+Dock-Rust/Projects/
+
+# Projects directory
+/projects
+
+# Node
+node_modules/
+.next/
+
+# Rust
+target/
+
+# Environment files
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
