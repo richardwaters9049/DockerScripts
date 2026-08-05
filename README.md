@@ -48,12 +48,12 @@ Given a project name, each script:
 
 ## Script Options
 
-| Script | Best For | Highlights |
-| --- | --- | --- |
-| `scripts/docker_pyNext` | Base starter | Fast bootstrap with users + training API pattern |
-| `scripts/docker_pyNext_v2` | UI-rich starter | Includes animated users dashboard setup |
-| `scripts/docker_pyNext_v3` | Recommended default | Most stable flow, improved test setup, cleaner API base config |
-| `scripts/docker_infraOps` | Infra engineer demo | Prometheus + Grafana + Loki + Alertmanager + MinIO + Restic lab |
+| Script                     | Best For            | Highlights                                                      |
+| -------------------------- | ------------------- | --------------------------------------------------------------- |
+| `scripts/docker_pyNext`    | Base starter        | Fast bootstrap with users + training API pattern                |
+| `scripts/docker_pyNext_v2` | UI-rich starter     | Includes animated users dashboard setup                         |
+| `scripts/docker_pyNext_v3` | Recommended default | Most stable flow, improved test setup, cleaner API base config  |
+| `scripts/docker_infraOps`  | Infra engineer demo | Prometheus + Grafana + Loki + Alertmanager + MinIO + Restic lab |
 
 Recommendation: use `scripts/docker_pyNext_v3` for new projects unless you need older behavior.
 
@@ -168,6 +168,13 @@ Tip: Add new tests under `backend/app/tests/` as endpoints or business logic gro
 
 You can package `docker_pyNext_v3` as a reusable Docker image and run it anywhere. 📦
 
+The Docker Hub image now defaults to a container-friendly mode:
+
+- `NON_INTERACTIVE=1`
+- `EXISTING_PATH_MODE=overwrite`
+- `PROJECT_NAME` can be passed as an argument or env var
+- generated files are written under `/workspace`
+
 Where to run commands:
 
 - Run the build/push commands from this repo root: `/Users/richy/Documents/Github/DockerScripts`
@@ -193,6 +200,14 @@ Build the image:
 docker build -f Dockerfile.dockerhub -t "$DOCKERHUB_USER/docker-pynext:v3" .
 ```
 
+Build stable tags:
+
+```bash
+docker build -f Dockerfile.dockerhub -t "$DOCKERHUB_USER/docker-pynext:v3" .
+docker tag "$DOCKERHUB_USER/docker-pynext:v3" "$DOCKERHUB_USER/docker-pynext:v1.0.0"
+docker tag "$DOCKERHUB_USER/docker-pynext:v3" "$DOCKERHUB_USER/docker-pynext:latest"
+```
+
 Test locally:
 
 ```bash
@@ -202,12 +217,32 @@ docker run --rm -it \
   "$DOCKERHUB_USER/docker-pynext:v3" my-app
 ```
 
+Run with env-only project selection:
+
+```bash
+docker run --rm -it \
+  -e PROJECT_NAME=my-app \
+  -v "$PWD:/workspace" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  "$DOCKERHUB_USER/docker-pynext:latest"
+```
+
+Scaffold only, without launching containers:
+
+```bash
+docker run --rm -it \
+  -e PROJECT_NAME=my-app \
+  -e SKIP_DOCKER_UP=1 \
+  -v "$PWD:/workspace" \
+  "$DOCKERHUB_USER/docker-pynext:latest"
+```
+
 Create a `docker-pynext` repository on [Docker Hub](https://hub.docker.com/) (one-time), then push:
 
 ```bash
 docker login
 docker push "$DOCKERHUB_USER/docker-pynext:v3"
-docker tag "$DOCKERHUB_USER/docker-pynext:v3" "$DOCKERHUB_USER/docker-pynext:latest"
+docker push "$DOCKERHUB_USER/docker-pynext:v1.0.0"
 docker push "$DOCKERHUB_USER/docker-pynext:latest"
 ```
 

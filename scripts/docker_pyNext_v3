@@ -37,7 +37,10 @@ banner() {
 ###########################################
 # 📦 Project Name
 ###########################################
-PROJECT_NAME=$1
+NON_INTERACTIVE="${NON_INTERACTIVE:-0}"
+EXISTING_PATH_MODE="${EXISTING_PATH_MODE:-overwrite}"
+SKIP_DOCKER_UP="${SKIP_DOCKER_UP:-0}"
+PROJECT_NAME="${1:-${PROJECT_NAME:-}}"
 [ -z "$PROJECT_NAME" ] && { echo -e "${RED}❌ Usage: docker-nextpy <project-name>${NC}"; exit 1; }
 
 ###########################################
@@ -47,27 +50,48 @@ handle_existing() {
   local path="$1"
   if [ -e "$path" ]; then
     echo -e "${YELLOW}⚠️  '$path' already exists.${NC}"
-    select choice in "Overwrite" "Keep" "Delete"; do
-      case $choice in
-        Overwrite)
-          echo "📝 Overwriting $path..."
+    if [ "$NON_INTERACTIVE" = "1" ]; then
+      case "$EXISTING_PATH_MODE" in
+        overwrite)
+          echo "📝 Non-interactive mode: overwriting $path..."
           rm -rf "$path"
           mkdir -p "$path"
-          break
           ;;
-        Keep)
-          echo "👌 Keeping existing $path"
-          break
+        keep)
+          echo "👌 Non-interactive mode: keeping existing $path"
           ;;
-        Delete)
-          echo "🗑️ Deleting $path..."
+        delete)
+          echo "🗑️ Non-interactive mode: deleting $path..."
           rm -rf "$path"
-          read -r -p "Recreate '$path'? (y/n): " recreate
-          [[ "$recreate" =~ ^[Yy]$ ]] && mkdir -p "$path"
-          break
+          ;;
+        *)
+          echo -e "${RED}❌ Unsupported EXISTING_PATH_MODE='$EXISTING_PATH_MODE'. Use overwrite, keep, or delete.${NC}"
+          exit 1
           ;;
       esac
-    done
+    else
+      select choice in "Overwrite" "Keep" "Delete"; do
+        case $choice in
+          Overwrite)
+            echo "📝 Overwriting $path..."
+            rm -rf "$path"
+            mkdir -p "$path"
+            break
+            ;;
+          Keep)
+            echo "👌 Keeping existing $path"
+            break
+            ;;
+          Delete)
+            echo "🗑️ Deleting $path..."
+            rm -rf "$path"
+            read -r -p "Recreate '$path'? (y/n): " recreate
+            [[ "$recreate" =~ ^[Yy]$ ]] && mkdir -p "$path"
+            break
+            ;;
+        esac
+      done
+    fi
   else
     mkdir -p "$path"
   fi
@@ -300,17 +324,36 @@ EOF
 # 💻 Frontend Setup
 ###########################################
 echo -e "${CYAN}📂 Setting up Next.js frontend...${NC}"
-SKIP_FRONTEND_CREATE=false
+SKIP_FRONTEND_CREATE="${SKIP_FRONTEND_CREATE:-false}"
 
 if [ -e frontend/package.json ]; then
   echo -e "${YELLOW}⚠️ 'frontend' already exists.${NC}"
-  select choice in "Overwrite" "Keep" "Delete"; do
-    case $choice in
-      Overwrite) rm -rf frontend; mkdir -p frontend; break ;;
-      Keep) SKIP_FRONTEND_CREATE=true; break ;;
-      Delete) rm -rf frontend; read -r -p "Recreate 'frontend'? (y/n): " r; [[ "$r" =~ ^[Yy]$ ]] && mkdir -p frontend; break ;;
+  if [ "$NON_INTERACTIVE" = "1" ]; then
+    case "$EXISTING_PATH_MODE" in
+      overwrite)
+        rm -rf frontend
+        mkdir -p frontend
+        ;;
+      keep)
+        SKIP_FRONTEND_CREATE=true
+        ;;
+      delete)
+        rm -rf frontend
+        ;;
+      *)
+        echo -e "${RED}❌ Unsupported EXISTING_PATH_MODE='$EXISTING_PATH_MODE'. Use overwrite, keep, or delete.${NC}"
+        exit 1
+        ;;
     esac
-  done
+  else
+    select choice in "Overwrite" "Keep" "Delete"; do
+      case $choice in
+        Overwrite) rm -rf frontend; mkdir -p frontend; break ;;
+        Keep) SKIP_FRONTEND_CREATE=true; break ;;
+        Delete) rm -rf frontend; read -r -p "Recreate 'frontend'? (y/n): " r; [[ "$r" =~ ^[Yy]$ ]] && mkdir -p frontend; break ;;
+      esac
+    done
+  fi
 fi
 
 if [ "$SKIP_FRONTEND_CREATE" != "true" ]; then
@@ -461,6 +504,12 @@ EOF
 ###########################################
 # 🚢 Launch Containers
 ###########################################
+if [ "$SKIP_DOCKER_UP" = "1" ]; then
+  echo -e "${YELLOW}⏭️  SKIP_DOCKER_UP=1, skipping docker-compose startup.${NC}"
+  echo -e "${GREEN}✔ Project '$PROJECT_NAME' scaffolded without launching containers.${NC}"
+  exit 0
+fi
+
 echo -e "${CYAN}🐳 Launching containers...${NC}"
 docker-compose up -d --build &
 spinner "Building containers"
@@ -523,4 +572,3 @@ echo "🌐 Frontend → http://localhost:3000"
 echo "🧠 Backend  → http://localhost:8000/users"
 echo "📚 Docs     → http://localhost:8000/docs"
 echo -e "${NC}"
-

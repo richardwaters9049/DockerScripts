@@ -1,11 +1,8 @@
 # macOS
 .DS_Store
 
-# Dock-Rust generated projects
-Dock-Rust/Projects/
-
 # Projects directory
-/projects
+projects/
 
 # Node
 node_modules/
